@@ -1,0 +1,12 @@
+{
+  "manifest_version": 3,
+  "name": "拾单 · 待加购清单",
+  "version": "0.1.0",
+  "description": "读取拾单已勾选商品，仅显示待加购清单。",
+  "action": { "default_popup": "popup.html" },
+  "content_scripts": [{
+    "matches": ["https://qyc20250805.github.io/shidan/*"],
+    "js": ["content.js"],
+    "run_at": "document_idle"
+  }]
+}
