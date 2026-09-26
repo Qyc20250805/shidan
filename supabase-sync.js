@@ -62,75 +62,86 @@ export async function getSupabase() {
   return clientPromise;
 }
 
+// Diagnostics never retain URL values or raw server messages.
+const safeErrors = {
+  otp_expired: "邮件链接已失效或已使用",
+  access_denied: "认证请求被拒绝",
+  bad_code_verifier: "此浏览器缺少匹配的登录验证信息",
+  flow_state_not_found: "登录流程已失效或浏览器不匹配",
+  flow_state_expired: "登录流程已过期",
+  invalid_credentials: "登录凭据无效",
+  bad_jwt: "登录凭据无效",
+  session_not_found: "未找到登录会话",
+  refresh_token_not_found: "未找到续期凭据",
+  refresh_token_already_used: "续期凭据已失效",
+  validation_failed: "登录参数校验失败",
+  unexpected_failure: "认证服务内部错误",
+  missing_callback_code: "链接缺少登录代码",
+  incomplete_callback_tokens: "链接缺少完整登录凭据",
+  token_hash_unsupported: "收到 token_hash，此页面尚未实现该验证方式",
+  callback_timeout: "建立登录会话超时",
+  callback_has_no_session: "认证未返回有效登录会话",
+};
+export function safeAuthError(error) {
+  const code = Object.hasOwn(safeErrors, error?.code) ? error.code :
+    error?.name === "AbortError" || error?.name === "TimeoutError" ? "network_timeout" :
+    error?.name === "AuthRetryableFetchError" || error?.name === "TypeError" ? "network_error" : "auth_error";
+  return { code, message: safeErrors[code] || ({network_timeout:"认证请求超时",network_error:"认证服务或脚本无法连接",auth_error:"认证失败，原始信息已隐藏以保护登录凭据"})[code] };
+}
+export function authReturnType(location = globalThis.location) {
+  const url = new URL(location.href), hash = new URLSearchParams(url.hash.slice(1));
+  if (url.searchParams.has("code")) return "code";
+  if (url.searchParams.has("token_hash") || hash.has("token_hash")) return "token_hash";
+  if (hash.has("access_token") || hash.has("refresh_token")) return "access_token（implicit）";
+  return "无登录参数";
+}
 let callbackPromise;
 export function initializeAuthCallback({
   location = globalThis.location,
-  history = globalThis.history,
   getClient = getSupabase,
+  onDiagnostic = () => {},
 } = {}) {
+  onDiagnostic("解析链接");
   const url = new URL(location.href);
   const hash = new URLSearchParams(url.hash.slice(1));
   const errorKeys = ["error", "error_code", "error_description"];
-  const hashCallback = ["access_token", "refresh_token", ...errorKeys].some(
-    (key) => hash.has(key),
-  );
-  const isCallback =
-    url.searchParams.has("code") ||
-    hashCallback ||
-    errorKeys.some((key) => url.searchParams.has(key));
+  const type = authReturnType(location);
+  const isCallback = type !== "无登录参数" || errorKeys.some(key => url.searchParams.has(key) || hash.has(key));
   if (!isCallback) return getClient();
   if (callbackPromise) return callbackPromise;
   callbackPromise = (async () => {
     let timer;
     try {
-      if (errorKeys.some((key) => url.searchParams.has(key) || hash.has(key))) {
-        throw Object.assign(new Error("callback rejected"), {
-          code: "otp_expired",
-        });
+      if (errorKeys.some(key => url.searchParams.has(key) || hash.has(key))) {
+        const code = url.searchParams.get("error_code") || hash.get("error_code") || url.searchParams.get("error") || hash.get("error");
+        throw { code };
       }
+      if (type === "token_hash") throw { code: "token_hash_unsupported" };
       const client = await getClient();
+      onDiagnostic("交换 session");
       let request;
-      if (url.searchParams.has("code")) {
+      if (type === "code") {
         const code = url.searchParams.get("code");
-        if (!code) throw new Error("missing callback code");
+        if (!code) throw { code: "missing_callback_code" };
         request = client.auth.exchangeCodeForSession(code);
       } else {
-        const access_token = hash.get("access_token");
-        const refresh_token = hash.get("refresh_token");
-        if (!access_token || !refresh_token)
-          throw new Error("incomplete callback tokens");
+        const access_token = hash.get("access_token"), refresh_token = hash.get("refresh_token");
+        if (!access_token || !refresh_token) throw { code: "incomplete_callback_tokens" };
         request = client.auth.setSession({ access_token, refresh_token });
       }
       const { data, error } = await Promise.race([
         request,
-        new Promise((_, reject) => {
-          timer = setTimeout(
-            () => reject(new Error("callback timeout")),
-            25000,
-          );
-        }),
+        new Promise((_, reject) => { timer = setTimeout(() => reject({ code: "callback_timeout" }), 25000); }),
       ]);
       if (error) throw error;
-      if (!data?.session?.user?.id) throw new Error("callback has no session");
+      if (!data?.session?.user?.id) throw { code: "callback_has_no_session" };
       return client;
-    } catch {
-      throw Object.assign(new Error("登录未完成，请重新发送登录邮件"), {
-        code: "AUTH_CALLBACK_FAILED",
-      });
+    } catch (error) {
+      const diagnostic = safeAuthError(error);
+      throw Object.assign(new Error(diagnostic.message), { code: "AUTH_CALLBACK_FAILED", diagnostic });
     } finally {
       clearTimeout(timer);
-      url.searchParams.delete("code");
-      for (const key of errorKeys) url.searchParams.delete(key);
-      if (hashCallback) url.hash = "";
-      try {
-        history.replaceState(
-          history.state,
-          "",
-          url.pathname + url.search + url.hash,
-        );
-      } catch {
-        // Embedded browsers can restrict history writes; never prevent rendering.
-      }
+      // The application cleans callback parameters only after session reading finishes.
     }
   })();
   return callbackPromise;

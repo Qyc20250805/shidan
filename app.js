@@ -2,12 +2,20 @@ import { parseChain } from "./chain.js";
 // Authentication must never be a static dependency of the initial workbench.
 // A stale/blocked auth module should fail inside bootCloud's try/finally,
 // not prevent this module from evaluating and rendering shell().
+let authDiagnostic = "";
+let authDiagnosticStage = "解析链接";
+let authDiagnosticType = "无登录参数";
+function showAuthDiagnostic(stage, result = "进行中") {
+  authDiagnosticStage = stage;
+  authDiagnostic = `回跳类型：${authDiagnosticType}；认证阶段：${stage}；${result}`;
+  updateSyncStatus();
+}
 let authModulePromise;
 function loadAuthModule() {
   if (!authModulePromise) {
     let timer;
     authModulePromise = Promise.race([
-      import("./supabase-sync.js?auth-callback=2"),
+      import("./supabase-sync.js?auth-diagnostics=1"),
       new Promise((_, reject) => {
         timer = setTimeout(
           () => reject(new Error("登录未完成，请重新发送登录邮件")),
@@ -1976,6 +1984,7 @@ function updateSyncStatus() {
       ? (offline ? "当前离线 · 已保存本地，联网后同步" : syncMessage) +
         " · 账号"
       : (offline ? "当前离线 · 仅保存本地" : syncMessage) + " · 邮箱登录";
+  if (authDiagnostic) $("#save-state").textContent += " · " + authDiagnostic;
   $("#save-state").setAttribute(
     "aria-label",
     authUser
@@ -2101,9 +2110,9 @@ function clearAuthCallbackLocation() {
   // Also covers failure to load the auth module itself (e.g. embedded mail browser).
   try {
     const url = new URL(location.href);
-    const keys = ["code", "error", "error_code", "error_description"];
+    const keys = ["code", "token_hash", "error", "error_code", "error_description"];
     const hash = new URLSearchParams(url.hash.slice(1));
-    const hasHash = ["access_token", "refresh_token", ...keys.slice(1)].some(
+    const hasHash = ["access_token", "refresh_token", ...keys].some(
       (key) => hash.has(key),
     );
     const changed = hasHash || keys.some((key) => url.searchParams.has(key));
@@ -2126,11 +2135,16 @@ async function bootCloud() {
   bootPromise = (async () => {
     authLoading = true;
     updateSyncStatus();
+    let safeError = () => ({code:"auth_module_unavailable",message:"认证模块未能加载"});
     try {
-      const { initializeAuthCallback } = await loadAuthModule();
-      const client = await initializeAuthCallback();
+      const { initializeAuthCallback, authReturnType, safeAuthError } = await loadAuthModule();
+      safeError = safeAuthError;
+      authDiagnosticType = authReturnType();
+      const client = await initializeAuthCallback({onDiagnostic: stage => showAuthDiagnostic(stage)});
+      showAuthDiagnostic("读取 session");
       const { data, error } = await client.auth.getSession();
       if (error) throw error;
+      showAuthDiagnostic("读取 session", data.session?.user ? "成功：已建立 session" : "结果：未发现 session");
       if (!db) {
         authUser = data.session?.user || null;
         setSyncMessage(
@@ -2167,6 +2181,8 @@ async function bootCloud() {
           /* Callback failure must not abort app initialization. */
         }
       }
+      const detail = error?.diagnostic || safeError(error);
+      showAuthDiagnostic(authDiagnosticStage, `失败：${detail.code} · ${detail.message}`);
       syncMessage = "登录未完成，请重新发送登录邮件";
       toast(syncMessage);
     } finally {
