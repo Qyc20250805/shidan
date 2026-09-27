@@ -163,7 +163,7 @@ export class WorkspaceSync {
       await this.store();
     }
     this.problem = null;
-    this.report(remote ? "已同步云端" : "已登录 · 修改后同步云端");
+    this.report(remote ? "已同步云端" : "已连接 · 修改后同步云端");
   }
 
   refresh(force = false) {
@@ -231,7 +231,7 @@ export class WorkspaceSync {
       this.problem = null;
       this.onSnapshot(clone(this.entry.snapshot));
       if (uploadLocal) await this.push();
-      else this.report(remote ? "已同步云端" : "已登录 · 修改后同步云端");
+      else this.report(remote ? "已同步云端" : "已连接 · 修改后同步云端");
     });
   }
 

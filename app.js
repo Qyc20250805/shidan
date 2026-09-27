@@ -1,45 +1,14 @@
 import { parseChain } from "./chain.js";
-// Authentication must never be a static dependency of the initial workbench.
-// A stale/blocked auth module should fail inside bootCloud's try/finally,
-// not prevent this module from evaluating and rendering shell().
-let authDiagnostic = "";
-let authDiagnosticStage = "解析链接";
-let authDiagnosticType = "无登录参数";
-function showAuthDiagnostic(stage, result = "进行中") {
-  authDiagnosticStage = stage;
-  authDiagnostic = `回跳类型：${authDiagnosticType}；认证阶段：${stage}；${result}`;
-  updateSyncStatus();
+let syncCodeModule;
+function loadSyncCode() {
+  return syncCodeModule ||= import("./sync-code.js?v=1").catch(error => { syncCodeModule = null; throw error; });
 }
-let authModulePromise;
-function loadAuthModule() {
-  if (!authModulePromise) {
-    let timer;
-    authModulePromise = Promise.race([
-      import("./supabase-sync.js?auth-diagnostics=1"),
-      new Promise((_, reject) => {
-        timer = setTimeout(
-          () => reject(new Error("登录未完成，请重新发送登录邮件")),
-          15000,
-        );
-      }),
-    ])
-      .catch((error) => {
-        authModulePromise = null;
-        throw error;
-      })
-      .finally(() => clearTimeout(timer));
-  }
-  return authModulePromise;
-}
-const sendEmailCode = async (...args) =>
-  (await loadAuthModule()).sendEmailCode(...args);
-const verifyEmailCode = async (...args) =>
-  (await loadAuthModule()).verifyEmailCode(...args);
-const signOut = async (...args) => (await loadAuthModule()).signOut(...args);
-const readCloudWorkspace = async (...args) =>
-  (await loadAuthModule()).readCloudWorkspace(...args);
-const saveCloudWorkspace = async (...args) =>
-  (await loadAuthModule()).saveCloudWorkspace(...args);
+const readCloudWorkspace = async (...args) => (await loadSyncCode()).readCloudWorkspace(...args);
+const saveCloudWorkspace = async (...args) => (await loadSyncCode()).saveCloudWorkspace(...args);
+const signOut = async () => {
+  (await loadSyncCode()).disconnectSyncCode();
+  await localPut("active-sync-code", null);
+};
 import { WorkspaceSync } from "./workspace-sync.js";
 import {
   DEFAULTS,
@@ -289,7 +258,7 @@ function shell() {
             "aria-live": "polite",
             role: "button",
             tabindex: "0",
-            title: "邮箱登录与云端同步",
+            title: "同步码与云端同步",
             onClick: showAccount,
             onKeydown: (event) => {
               if (event.key === "Enter" || event.key === " ") {
@@ -447,7 +416,7 @@ function shell() {
         h(
           "span",
           { id: "storage-note" },
-          "未登录时数据仅保存在当前浏览器 · 点击保存状态登录",
+          "无需登录即可使用 · 点击保存状态设置同步码",
         ),
         h("span", {}, "当前适配：Petit Bateau 日本官网"),
       ),
@@ -1960,7 +1929,7 @@ async function start() {
     try {
       await bootCloud();
     } catch {
-      syncMessage = "登录未完成，请重新发送登录邮件";
+      syncMessage = "同步连接未完成，本地数据已保留";
       toast(syncMessage);
     } finally {
       authLoading = false;
@@ -1979,22 +1948,22 @@ function updateSyncStatus() {
   if (!$("#save-state") || conflict) return;
   const offline = globalThis.navigator?.onLine === false;
   $("#save-state").textContent = authLoading
-    ? "正在读取账号…"
+    ? "正在连接同步码…"
     : authUser
       ? (offline ? "当前离线 · 已保存本地，联网后同步" : syncMessage) +
-        " · 账号"
-      : (offline ? "当前离线 · 仅保存本地" : syncMessage) + " · 邮箱登录";
-  if (authDiagnostic) $("#save-state").textContent += " · " + authDiagnostic;
+        " · 同步码"
+      : (offline ? "当前离线 · 仅保存本地" : syncMessage) + " · 同步码";
+  
   $("#save-state").setAttribute(
     "aria-label",
     authUser
-      ? `账号与同步：${authUser.email || "已登录"}，${syncMessage}`
-      : "邮箱登录与云端同步",
+      ? `同步码工作台：${syncMessage}`
+      : "同步码与云端同步",
   );
   if ($("#storage-note"))
     $("#storage-note").textContent = authUser
-      ? "同一邮箱共用云端工作台 · 离线修改先保存在此浏览器"
-      : "未登录时数据仅保存在当前浏览器 · 点击保存状态登录";
+      ? "同一同步码共用工作台 · 离线修改先保存在此浏览器"
+      : "无需登录即可使用 · 点击保存状态设置同步码";
   const locked = authLoading || (authUser && !workspaceSync?.ready);
   for (const element of $$(".settings,.workspace,.mobile-bottom-nav"))
     element.inert = Boolean(locked);
@@ -2054,8 +2023,8 @@ async function changeAccount(user) {
   const guest = (await localGet("current")) || emptyWorkspace();
   if (epoch !== authEpoch) return;
   await localPut(
-    "cloud-session",
-    user ? { id: user.id, email: user.email } : null,
+    "sync-code-session",
+    user ? { id: user.id } : null,
   );
   if (epoch !== authEpoch) return;
   if (!user) {
@@ -2106,90 +2075,21 @@ function resumeApplicationAfterAuth() {
   updateSyncStatus();
 }
 
-function clearAuthCallbackLocation() {
-  // Also covers failure to load the auth module itself (e.g. embedded mail browser).
-  try {
-    const url = new URL(location.href);
-    const keys = ["code", "token_hash", "error", "error_code", "error_description"];
-    const hash = new URLSearchParams(url.hash.slice(1));
-    const hasHash = ["access_token", "refresh_token", ...keys].some(
-      (key) => hash.has(key),
-    );
-    const changed = hasHash || keys.some((key) => url.searchParams.has(key));
-    if (!changed) return;
-    for (const key of keys) url.searchParams.delete(key);
-    if (hasHash) url.hash = "";
-    history.replaceState(
-      history.state,
-      "",
-      url.pathname + url.search + url.hash,
-    );
-  } catch {
-    /* History restrictions must never block the workbench. */
-  }
-}
-
 async function bootCloud() {
-  if (!db && typeof location === "undefined") return;
+  if (!db) return;
   if (bootPromise) return bootPromise;
   bootPromise = (async () => {
-    authLoading = true;
-    updateSyncStatus();
-    let safeError = () => ({code:"auth_module_unavailable",message:"认证模块未能加载"});
     try {
-      const { initializeAuthCallback, authReturnType, safeAuthError } = await loadAuthModule();
-      safeError = safeAuthError;
-      authDiagnosticType = authReturnType();
-      const client = await initializeAuthCallback({onDiagnostic: stage => showAuthDiagnostic(stage)});
-      showAuthDiagnostic("读取 session");
-      const { data, error } = await client.auth.getSession();
-      if (error) throw error;
-      showAuthDiagnostic("读取 session", data.session?.user ? "成功：已建立 session" : "结果：未发现 session");
-      if (!db) {
-        authUser = data.session?.user || null;
-        setSyncMessage(
-          authUser
-            ? "已登录 · 本地存储不可用，请使用完整备份"
-            : "本地存储不可用，请使用完整备份",
-        );
-        return client;
-      }
-      if (!authSubscription) {
-        authSubscription = client.auth.onAuthStateChange((_event, session) => {
-          const next = session?.user || null;
-          // Never await Supabase calls inside its synchronous auth callback.
-          setTimeout(() => {
-            if ((next?.id || null) !== (authUser?.id || null)) {
-              changeAccount(next).catch(() =>
-                setSyncMessage("账号读取失败，请刷新页面"),
-              );
-            }
-          }, 0);
-        }).data.subscription;
-      }
-      if ((data.session?.user?.id || null) !== (authUser?.id || null)) {
-        await changeAccount(data.session?.user || null);
-      }
-      return client;
-    } catch (error) {
-      // Retain the existing offline-account fallback, but isolate its errors too.
-      if (db && error?.code !== "AUTH_CALLBACK_FAILED") {
-        try {
-          const cachedUser = await localGet("cloud-session");
-          if (cachedUser && !authUser) await changeAccount(cachedUser);
-        } catch {
-          /* Callback failure must not abort app initialization. */
-        }
-      }
-      const detail = error?.diagnostic || safeError(error);
-      showAuthDiagnostic(authDiagnosticStage, `失败：${detail.code} · ${detail.message}`);
-      syncMessage = "登录未完成，请重新发送登录邮件";
-      toast(syncMessage);
+      const code = await localGet("active-sync-code");
+      if (!code) return;
+      const api = await loadSyncCode();
+      const user = await api.restoreSyncCode(code);
+      if (authUser?.id !== user.id) await changeAccount(user);
+    } catch {
+      syncMessage = "同步连接未完成 · 本地数据已保留，点击重试";
     } finally {
       authLoading = false;
       bootPromise = null;
-      clearAuthCallbackLocation();
-      // A callback/CDN/session/storage exception must always return to the app.
       resumeApplicationAfterAuth();
     }
   })();
@@ -2217,31 +2117,32 @@ function showAccount() {
     return;
   }
   if (!authUser) {
-    showEmailLogin();
+    showSyncCode();
     return;
   }
   const engine = workspaceSync;
   const body = h(
     "div",
     {},
-    h("p", {}, `当前邮箱：${authUser.email || "已登录"}`),
+    h("p", {}, "当前已连接同步码工作台"),
+    btn("查看 / 复制同步码", () => showSyncCode(true)),
     h("p", { role: "status" }, syncMessage),
     errorBox(),
   );
   const cancel = btn("关闭", () => $("#dialog").close());
   const logout = btn(
-    "退出登录",
+    "断开同步码",
     () => {
       modal(
-        "退出当前邮箱？",
+        "断开当前同步码？",
         h(
           "p",
           {},
-          "未同步的修改会保留在此浏览器的当前账号副本中。再次登录此邮箱后继续同步；退出后显示原来的本地工作台。",
+          "未同步修改保留在此浏览器的同步码副本中。再次输入相同同步码可继续；断开后恢复本机原有工作台。请先复制保存同步码。",
         ),
         [
           btn("取消", () => $("#dialog").close()),
-          btn("确认退出", async (event) => {
+          btn("确认断开", async (event) => {
             event.target.disabled = true;
             authBusy = true;
             try {
@@ -2250,7 +2151,7 @@ function showAccount() {
               await signOut();
               if (authUser) await changeAccount(null);
             } catch {
-              toast("退出失败，请联网后重试；数据已保留");
+              toast("断开失败，数据已保留，请重试");
             } finally {
               authBusy = false;
               event.target.disabled = false;
@@ -2267,8 +2168,8 @@ function showAccount() {
         "p",
         {},
         engine.remote
-          ? "当前邮箱已有云端数据。使用云端数据不会删除本浏览器原有的本地工作台；退出登录后仍可查看或导出本地原件。"
-          : "发现此浏览器有本地数据。是否迁移到当前邮箱，让手机和电脑共用？本地原件仍会保留。",
+          ? "当前同步码已有云端数据。使用云端数据不会删除本浏览器原有的本地工作台；断开同步码后仍可查看或导出本地原件。"
+          : "发现此浏览器有本地数据。是否迁移到当前同步码，让手机和电脑共用？本地原件仍会保留。",
       ),
     );
     const choose = (upload) => async (event) => {
@@ -2293,7 +2194,7 @@ function showAccount() {
           engine.remote ? "使用云端数据" : "不迁移，使用空白云端工作台",
           choose(false),
         ),
-        engine.remote ? null : btn("确认迁移到此邮箱", choose(true), "primary"),
+        engine.remote ? null : btn("确认迁移到此同步码", choose(true), "primary"),
       ].filter(Boolean),
     );
     return;
@@ -2333,7 +2234,7 @@ function showAccount() {
     ]);
     return;
   }
-  modal("邮箱账号与同步", body, [
+  modal("同步码与数据同步", body, [
     cancel,
     logout,
     btn(
@@ -2349,110 +2250,39 @@ function showAccount() {
   ]);
 }
 
-function showEmailLogin() {
-  let sentEmail = "",
-    busy = false;
-  const email = field("邮箱", "login-email", "", "email", {
-    autocomplete: "email",
-    "aria-describedby": "form-error",
-  });
-  const code = field("邮件验证码（如有）", "login-code", "", "password", {
-    autocomplete: "one-time-code",
-    inputmode: "numeric",
-    "aria-describedby": "form-error",
-  });
-  code.classList.add("hidden");
-  const hint = h(
-    "p",
-    { class: "help", role: "status" },
-    "使用同一邮箱登录，手机和电脑读取同一份工作台数据。",
-  );
+async function showSyncCode(reveal = false) {
+  const api = await loadSyncCode();
+  const existing = reveal ? api.currentSyncCode() : "";
+  const input = field("同步码", "sync-code", existing, "text", {autocomplete:"off", spellcheck:"false"});
   const error = errorBox();
-  const body = h(
-    "form",
-    {
-      novalidate: "",
-      onSubmit: (event) => {
-        event.preventDefault();
-        if (!busy) (sentEmail ? verify : send).click();
-      },
-    },
-    email,
-    code,
-    hint,
-    error,
-  );
-  const send = btn(
-    "发送登录邮件",
-    async () => {
-      if (busy) return;
-      const input = email.querySelector("input"),
-        value = input.value.trim();
-      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value)) {
-        error.textContent = "请填写有效邮箱";
-        input.setAttribute("aria-invalid", "true");
-        input.focus();
-        return;
-      }
-      input.removeAttribute("aria-invalid");
-      busy = true;
-      send.disabled = true;
-      verify.disabled = true;
-      error.textContent = "";
-      try {
-        await bootCloud();
-        await sendEmailCode(value);
-        sentEmail = value;
-        code.classList.remove("hidden");
-        input.readOnly = true;
-        hint.textContent =
-          "邮件已发送。点击邮件中的登录链接返回本站；若邮件含验证码，在下方输入后登录。";
-        verify.classList.remove("hidden");
-        code.querySelector("input").focus();
-      } catch {
-        error.textContent = "邮件未发送成功，请检查网络、邮箱或稍后重试。";
-      } finally {
-        busy = false;
-        send.disabled = false;
-        verify.disabled = false;
-      }
-    },
-    "primary",
-  );
-  const verify = btn(
-    "验证并登录",
-    async () => {
-      if (busy) return;
-      const token = code.querySelector("input").value.trim();
-      if (!/^\d{6,10}$/.test(token)) {
-        error.textContent = "请输入邮件中的数字验证码";
-        return;
-      }
-      busy = true;
-      verify.disabled = true;
-      send.disabled = true;
-      error.textContent = "";
-      try {
-        const session = await verifyEmailCode(sentEmail, token);
-        if (session?.user && authUser?.id !== session.user.id)
-          await changeAccount(session.user);
-      } catch {
-        error.textContent = "验证码无效或已过期，请检查后重试或重新发送邮件。";
-      } finally {
-        busy = false;
-        verify.disabled = false;
-        send.disabled = false;
-      }
-    },
-    "primary",
-  );
-  verify.classList.add("hidden");
-  modal("邮箱登录", body, [
-    btn("取消", () => $("#dialog").close()),
-    send,
-    verify,
-  ]);
-  email.querySelector("input").focus();
+  const description = h("p", {}, "无需邮箱。创建同步码后，在另一台设备粘贴同一码即可共享。持有码的人可读写数据，请妥善保管。");
+  const body = h("div", {}, description, input, error);
+  const close = btn("关闭", () => $("#dialog").close());
+  if (reveal) {
+    input.querySelector("input").readOnly = true;
+    modal("当前同步码", body, [close, btn("复制同步码", async () => {
+      try { await navigator.clipboard.writeText(existing); toast("同步码已复制"); }
+      catch { input.querySelector("input").select(); error.textContent="请手动复制所选同步码"; }
+    }, "primary")]);
+    return;
+  }
+  let busy = false;
+  const connect = async (create, button) => {
+    if (busy) return;
+    busy = true; button.disabled = true; error.textContent = "";
+    const value = create ? api.generateSyncCode() : input.querySelector("input").value;
+    try {
+      await writeQueue;
+      const user = await api.connectSyncCode(value, create);
+      await localPut("active-sync-code", api.normalizeSyncCode(value));
+      await changeAccount(user);
+      if (!workspaceSync?.problem) showSyncCode(true);
+    } catch (cause) { error.textContent = cause.message || "连接未完成，本地数据已保留"; }
+    finally { busy=false; button.disabled=false; }
+  };
+  modal("同步码", body, [close,
+    btn("创建新同步码", event => connect(true,event.currentTarget)),
+    btn("连接此同步码", event => connect(false,event.currentTarget), "primary")]);
 }
 
 if (typeof window !== "undefined") {
