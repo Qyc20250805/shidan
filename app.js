@@ -212,6 +212,16 @@ function field(label, id, value, type = "text", attrs = {}) {
     h("input", { id, type, value, ...attrs }),
   );
 }
+function checkMerchant() {
+  const input = $("#merchant");
+  const valid = Boolean(productUrl(input.value.trim()));
+  if (!valid) {
+    input.setAttribute("aria-invalid", "true");
+    toast("请先填写有效的商家网址（http:// 或 https://）");
+    input.focus();
+  } else input.removeAttribute("aria-invalid");
+  return valid;
+}
 function settingInput(key, value) {
   state.settings[key] = value;
   persist();
@@ -278,8 +288,13 @@ function shell() {
       h(
         "section",
         { class: "settings", "aria-label": "本批计价设置" },
-        field("商家网址", "merchant", state.settings.merchant, "url", {
-          onChange: (e) => settingInput("merchant", e.target.value.trim()),
+        field("商家网址（必填）", "merchant", state.settings.merchant, "url", {
+          required: "",
+          "aria-required": "true",
+          onChange: (e) => {
+            settingInput("merchant", e.target.value.trim());
+            checkMerchant();
+          },
         }),
         h(
           "label",
@@ -1093,6 +1108,7 @@ async function imageData(file) {
   });
 }
 function editRow(existing) {
+  if (!existing && !checkMerchant()) return;
   if (!existing && state.rows.length >= 2000)
     return toast("最多2,000条明细，请先导出备份再分批处理");
   const r =
@@ -1104,7 +1120,6 @@ function editRow(existing) {
   const locked = r.status !== "draft";
   const fields = !existing ? [
     ["customer", "客户昵称", "text"],
-    ["name", "商品名称（可选）", "text"],
     ["sku", "货号", "text"],
     ["size", "目标尺码（cm）", "text"],
     ["url", "商品链接（可选）", "url"],
@@ -1205,6 +1220,7 @@ function editRow(existing) {
         "保存明细",
         () => {
           if (conflict) return toast("请先刷新，避免覆盖另一窗口");
+          if (!existing && !checkMerchant()) return;
           const v = { ...r, image: photo };
           fields.forEach(([key, , type]) => {
             const val = $("#edit-" + key).value.trim();
@@ -1864,7 +1880,7 @@ function restoreBackup() {
             if (typeof r[k] !== "string") throw Error("备份字段格式错误");
           if (
             r.url &&
-            !/^https:\/\/www\.petit-bateau\.co\.jp\/products\//.test(r.url)
+            !productUrl(r.url)
           )
             throw Error("备份中存在无效商品链接");
           if (r.image && !safeImage(r.image)) r.image = "";

@@ -71,15 +71,14 @@ export function validateRow(r) {
   if (r.rate !== "" && (!Number.isFinite(+r.rate) || +r.rate <= 0))
     return "汇率须大于 0";
   if (r.url && !productUrl(r.url))
-    return "商品链接须为 Petit Bateau 日本官网的商品页";
+    return "商品链接须为有效的 http:// 或 https:// 网址";
   return "";
 }
 export function productUrl(value) {
   try {
     const u = new URL(value);
-    return u.protocol === "https:" &&
-      u.hostname === "www.petit-bateau.co.jp" &&
-      u.pathname.startsWith("/products/")
+    return ["https:", "http:"].includes(u.protocol) &&
+      Boolean(u.hostname) && !u.username && !u.password
       ? u.href
       : null;
   } catch {
