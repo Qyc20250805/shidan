@@ -1102,7 +1102,13 @@ function editRow(existing) {
     });
   let photo = r.image;
   const locked = r.status !== "draft";
-  const fields = [
+  const fields = !existing ? [
+    ["customer", "客户昵称", "text"],
+    ["name", "商品名称（可选）", "text"],
+    ["sku", "货号", "text"],
+    ["size", "目标尺码（cm）", "text"],
+    ["url", "商品链接（可选）", "url"],
+  ] : [
     ["customer", "客户昵称", "text"],
     ["sku", "货号", "text"],
     ["name", "商品名称", "text"],
@@ -1162,7 +1168,9 @@ function editRow(existing) {
     h(
       "p",
       { class: "help" },
-      "计价基础固定等于网页当前售价；原价仅记录。应收人民币 = 网页当前售价 × 核算折扣 × 数量 × 汇率 + 行运费。运费整行只加一次。汇率为本行币种兑人民币。",
+      !existing
+        ? "数量默认 1，状态默认待处理；核算折扣和汇率沿用顶部设置。原价、售价、运费可在新增后编辑，应收按现有规则计算。"
+        :"计价基础固定等于网页当前售价；原价仅记录。应收人民币 = 网页当前售价 × 核算折扣 × 数量 × 汇率 + 行运费。运费整行只加一次。汇率为本行币种兑人民币。",
     ),
     locked
       ? h(
