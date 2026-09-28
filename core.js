@@ -1,3 +1,4 @@
+import {getMerchant} from './merchants.js';
 export const MAX_ITEMS = 20;
 export const DEFAULTS = {
   merchant: "https://www.petit-bateau.co.jp/",
@@ -100,8 +101,8 @@ export function batchCheck(rows, settings) {
   )
     return "请修正顶部折扣和汇率";
   try {
-    if (new URL(settings.merchant).hostname !== "www.petit-bateau.co.jp")
-      return "当前助手仅适配 Petit Bateau 日本官网";
+    if (!getMerchant(settings.merchant))
+      return "请填写 Petit Bateau、panpantutu、Miki House 或 Montbell 日本站网址";
   } catch {
     return "请填写有效的商家网址";
   }

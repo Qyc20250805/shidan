@@ -1,3 +1,4 @@
+import {getMerchant} from './merchants.js';
 import { parseChain } from "./chain.js";
 let syncCodeModule;
 function loadSyncCode() {
@@ -421,7 +422,7 @@ function shell() {
                 h("div", {}, a, h("small", {}, b)),
               );
             }),
-            btn("安装加购助手 ↗", showHelp, "ghost"),
+            btn("安装加购助手 ↗", installHelper, "ghost"),
           ),
         ),
       ),
@@ -433,7 +434,7 @@ function shell() {
           { id: "storage-note" },
           "无需登录即可使用 · 点击保存状态设置同步码",
         ),
-        h("span", {}, "当前适配：Petit Bateau 日本官网"),
+        h("span", {}, "支持：Petit Bateau · panpantutu · Miki House · Montbell 日本站"),
       ),
     ),
     h(
@@ -965,8 +966,8 @@ function rowNode(r) {
       {},
       h(
         "span",
-        { class: `badge ${r.status}` },
-        { draft: "待处理", handoff: "已交接", ordered: "已下单" }[r.status],
+        { class: `badge ${r.status}`, title: r.helper?.reason || "" },
+        helperStatus(r),
       ),
     ),
     h(
@@ -1038,7 +1039,7 @@ function renderSide() {
       { class: count > 20 ? "error" : "note", id: "batch-error" },
       error || "明细准备好了，可交接到加购助手。",
     ),
-    btn("推送到购物车 →", reviewBatch, "primary", {
+    btn("开始加购 →", startHelper, "primary", {
       disabled: !!error || conflict,
       "aria-describedby": "batch-error",
     }),
@@ -1055,7 +1056,7 @@ function renderSide() {
     h(
       "p",
       { class: "note" },
-      "通过加购助手在你的浏览器中操作。交接不代表已加购，也不会自动下单。",
+      "助手按货号查找，逐件人工确认图片后加购。不一致会标记“需人工核对”，不会下单或付款。",
     ),
   );
 }
@@ -1187,6 +1188,7 @@ function editRow(existing) {
         ? "数量默认 1，状态默认待处理；核算折扣和汇率沿用顶部设置。原价、售价、运费可在新增后编辑，应收按现有规则计算。"
         :"计价基础固定等于网页当前售价；原价仅记录。应收人民币 = 网页当前售价 × 核算折扣 × 数量 × 汇率 + 行运费。运费整行只加一次。汇率为本行币种兑人民币。",
     ),
+    r.helper ? h("p", {class:"notice"}, `${helperStatus(r)} · 已加 ${r.helper.added}/${r.quantity} 件。${r.helper.reason || ""}`) : null,
     locked
       ? h(
           "p",
@@ -1502,7 +1504,7 @@ function exportCSV() {
       a.rate,
       a.yen,
       a.cny,
-      { draft: "待处理", handoff: "已交接", ordered: "已下单" }[r.status],
+      helperStatus(r),
       r.originalPrice ?? "",
       r.currency || "JPY",
     ];
@@ -1514,12 +1516,98 @@ function exportCSV() {
     "text/csv;charset=utf-8",
   );
 }
+const helperRequests = new Map();
+function helperRequest(type, data = {}, timeout = 8000) {
+  return new Promise((resolve, reject) => {
+    const requestId = uid();
+    const timer = setTimeout(() => { helperRequests.delete(requestId); reject(Error('未连接到加购助手。请安装或更新扩展，再刷新拾单页面。')); }, timeout);
+    helperRequests.set(requestId, { resolve, reject, timer });
+    window.postMessage({ source: 'shidan-page-v2', type, requestId, ...data }, location.origin);
+  });
+}
+function helperStatus(r) {
+  if (r.status !== "handoff") return {draft:"待处理",ordered:"已下单"}[r.status] || "已交接";
+  return { pending: '加购处理中', added: '已加购', review: '需人工核对', failed: '加购失败' }[r.helper?.status] || { draft: '待处理', handoff: '已交接', ordered: '已下单' }[r.status];
+}
+function applyHelperResult(result) {
+  if (conflict || !result || !Array.isArray(result.items)) return;
+  const batch = state.batches.find(b => b.id === result.id && b.helper);
+  if (!batch) return;
+  let changed = batch.helperDone !== Boolean(result.done);
+  batch.helperDone = Boolean(result.done);
+  for (const update of result.items) {
+    const row = state.rows.find(r => r.id === update.id && r.batchId === batch.id);
+    const original = batch.rows.find(r => r.id === update.id);
+    if (!row || !original || !['pending','added','review','failed'].includes(update.status) || !Number.isSafeInteger(update.added) || update.added < 0 || update.added > original.quantity) continue;
+    const next = { status: update.status, added: update.added, reason: String(update.reason || '').slice(0,180) };
+    if (JSON.stringify(row.helper) !== JSON.stringify(next)) { row.helper = next; original.helper = {...next}; changed = true; }
+  }
+  if (changed) { persist(); renderContent(); renderSide(); }
+}
+if (typeof window !== 'undefined') {
+  window.addEventListener('message', event => {
+    if (event.source !== window || event.origin !== location.origin || event.data?.source !== 'shidan-extension-v2') return;
+    const message = event.data, pending = helperRequests.get(message.requestId);
+    if (pending) { clearTimeout(pending.timer); helperRequests.delete(message.requestId); message.error ? pending.reject(Error(message.error)) : pending.resolve(message); }
+    if (message.result) applyHelperResult(message.result);
+    if (Array.isArray(message.results)) message.results.forEach(applyHelperResult);
+  });
+  const pollHelper = () => {
+    const ids = state.batches.filter(b => b.helper && b.status === 'handoff').map(b => b.id);
+    if (ids.length) helperRequest('SD_POLL', { ids }).catch(() => {});
+  };
+  window.addEventListener('focus', pollHelper);
+  setInterval(() => { if (!document.hidden) pollHelper(); }, 5000);
+}
+function installHelper() {
+  modal('安装 四商家加购助手', h('div', {},
+    h('p', {}, '请使用电脑 Chrome。下载并解压安装包，文件夹第一层应包含 manifest.json。'),
+    h('p', {}, '打开 chrome://extensions，开启“开发者模式”，点击“加载已解压的扩展程序”，选择解压文件夹。安装或更新后刷新拾单及商家页面。'),
+    h('a', {href:'./shidan-helper.zip?v=0.3.0',download:'shidan-helper.zip',class:'primary'}, '下载 Chrome 扩展安装包'),
+    h('p', {class:'help'}, '已有旧版请移除旧版再加载此版本，避免两个助手同时工作。每件必须人工确认图片、颜色和尺码；仅加购物车，不提交订单、不付款。')
+  ), [btn('关闭', () => $('#dialog').close())]);
+}
+let helperStarting = false;
+async function startHelper() {
+  if (helperStarting || conflict) return;
+  const rows = selectRows();
+  const error = batchCheck(rows, state.settings);
+  if (error) return toast(error);
+  if (document.querySelector('.settings [aria-invalid=true]')) return toast('请修正顶部设置');
+  const epoch = authEpoch;
+  helperStarting = true;
+  try {
+    await helperRequest('SD_HELLO');
+    if (epoch !== authEpoch || conflict) throw Error('工作台已切换，请重新选择商品');
+    const current = selectRows();
+    const problem = batchCheck(current, state.settings); if (problem) throw Error(problem);
+    const batch = { id: uid(), created: new Date().toISOString(), status: 'handoff', helper: true, merchant: state.settings.merchant, rows: structuredClone(current) };
+    const payload = batchFile(batch);
+    // Persist the batch identity before dispatch, so a reload can recover its results.
+    state.batches.unshift(batch);
+    for (const row of current) { const frozen = amounts(row, state.settings); row.discount = frozen.discount; row.rate = frozen.rate; row.status = 'handoff'; row.batchId = batch.id; row.helper = {status:'pending',added:0,reason:''}; }
+    selected.clear(); persist(); renderContent(); renderSide();
+    try {
+      const response = await helperRequest('SD_START', {batch:payload}, 20000);
+      if (epoch === authEpoch) applyHelperResult(response.result);
+      toast('已打开商家网站，请在助手中逐件核对图片');
+    } catch (error) {
+      if (epoch === authEpoch) {
+        for (const row of current) row.helper = {status:'review',added:0,reason:'助手响应未确认，请先核对扩展与购物车，勿重复加购'};
+        persist(); renderContent(); renderSide();
+      }
+      throw error;
+    }
+  } catch (error) { toast(error.message); }
+  finally { helperStarting = false; }
+}
+
 function batchFile(batch) {
   return {
     format: "shidan-batch-v1",
     id: batch.id,
     created: batch.created,
-    merchant: state.settings.merchant,
+    merchant: batch.merchant || state.settings.merchant,
     items: batch.rows.map((r) => ({
       id: r.id,
       sku: r.sku,
@@ -1676,7 +1764,7 @@ function renderBatches() {
             "a",
             {
               class: "button",
-              href: "https://www.petit-bateau.co.jp/cart",
+              href: (() => {const m=getMerchant(b.merchant || state.settings.merchant);return m ? m.origin+m.cartPath : state.settings.merchant;})(),
               target: "_blank",
               rel: "noopener noreferrer",
             },
@@ -1727,10 +1815,14 @@ function changeBatch(b, status) {
       btn("取消", () => $("#dialog").close()),
       btn(
         cancel ? "撤回批次" : "确认已下单",
-        () => {
+        async () => {
           if (!$("#batch-ack").checked) {
             $("#form-error").textContent = "请先确认上面的事项";
             return;
+          }
+          if (b.helper && !b.helperDone) {
+            try { await helperRequest("SD_CANCEL", {id:b.id}); }
+            catch (error) { $("#form-error").textContent = "请先在扩展中停止本批，再刷新拾单核对结果。"; return; }
           }
           b.status = status;
           b.rows.forEach((old) => {
@@ -1741,6 +1833,7 @@ function changeBatch(b, status) {
               r.status = cancel ? "draft" : "ordered";
               if (cancel) {
                 delete r.batchId;
+                delete r.helper;
                 r.discount = old.discount;
                 r.rate = old.rate;
               }
@@ -1766,7 +1859,7 @@ function showHelp() {
       h(
         "p",
         {},
-        "先填写或粘贴明细，勾选合计不超过 20 件，再下载加购批次。浏览器之间数据不自动同步，请使用完整备份转移。",
+        "顶部填写商家网址，勾选合计不超过 20 件，点击“开始加购”。同一同步码可共享工作台数据；加购需在安装扩展的电脑 Chrome 中完成。",
       ),
       h("h3", {}, "首次安装（Chrome / Edge 电脑版）"),
       h(
@@ -1781,12 +1874,12 @@ function showHelp() {
         h(
           "li",
           {},
-          "选择解压后的 extension 文件夹，点击工具栏中的“拾单加购助手”。",
+          "选择解压后含 manifest.json 的文件夹，然后刷新拾单页面。",
         ),
         h(
           "li",
           {},
-          "导入本工作台下载的批次文件。每件先核对图片、颜色和尺码，再点击“确认并加入购物车”。",
+          "在拾单点击“开始加购”。每件核对图片、颜色和尺码，确认一致后加入购物车。",
         ),
       ),
       h(
@@ -1797,7 +1890,7 @@ function showHelp() {
       h(
         "p",
         { class: "help" },
-        "助手仅请求 Petit Bateau 日本官网的访问权限，不读取客户昵称，也不点击结算或付款。其他商家需要后续适配。",
+        "助手仅访问拾单和这四家商店，不读取客户昵称、同步码和账单金额，也不点击结算或付款。",
       ),
       h("h3", {}, "金额如何计算"),
       h(
@@ -2563,8 +2656,8 @@ function mobileRecord(r, billing) {
       ),
       h(
         "span",
-        { class: "badge " + r.status },
-        { draft: "待处理", handoff: "已交接", ordered: "已下单" }[r.status],
+        { class: "badge " + r.status, title: r.helper?.reason || "" },
+        helperStatus(r),
       ),
     ),
     h(
