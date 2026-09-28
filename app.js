@@ -60,7 +60,6 @@ let state = {
   query = "",
   filter = "all",
   page = 1,
-  undo = null,
   db,
   writeQueue = Promise.resolve(),
   conflict = false;
@@ -100,7 +99,7 @@ function toast(text) {
   clearTimeout(toast.timer);
   toast.timer = setTimeout(() => $("#toast").classList.add("hidden"), 4500);
 }
-function persist() {
+function persist(onFailure) {
   if (!db) {
     toast("本地存储不可用，请导出备份");
     return;
@@ -122,6 +121,7 @@ function persist() {
       })
       .catch((error) => {
         setSyncMessage(error.message || "本地保存失败，请导出备份");
+        onFailure?.(error);
       });
     return;
   }
@@ -140,7 +140,8 @@ function persist() {
       setSyncMessage("已保存在此浏览器");
       channel?.postMessage({ scope: "local" });
     })
-    .catch(() => {
+    .catch((error) => {
+      onFailure?.(error || Error("本地保存失败"));
       $("#save-state").textContent = "保存失败，请导出备份";
       toast("本地保存失败，建议立即导出备份");
     });
@@ -177,6 +178,43 @@ function errorBox() {
 }
 function selectRows() {
   return state.rows.filter((r) => selected.has(r.id));
+}
+// Keep checkbox nodes mounted while selection changes: native click/change and
+// desktop/mobile projections must observe the same Set, without rebuilding fields.
+function updateSelectionView() {
+  const rows = selectRows();
+  for (const box of $$('input[data-select-row]')) {
+    const on = selected.has(box.dataset.selectRow);
+    box.checked = on;
+    box.closest('tr,article')?.classList.toggle('selected', on);
+  }
+  for (const box of $$('input[data-select-page]')) {
+    const ids = JSON.parse(box.dataset.selectPage);
+    box.checked = ids.length > 0 && ids.every(id => selected.has(id));
+    box.indeterminate = ids.some(id => selected.has(id)) && !box.checked;
+  }
+  renderSide();
+}
+function selectPageItems(rows, checked) {
+  const remaining = 20 - selectRows().reduce((sum, row) => sum + Number(row.quantity), 0);
+  const anySelected = rows.some(row => selected.has(row.id));
+  const canAdd = rows.some(row => !selected.has(row.id) && Number(row.quantity) <= remaining);
+  // A capped partial page can still be cleared using its select-all checkbox.
+  selectItems(rows, checked && (!anySelected || canAdd));
+}
+function selectItems(rows, checked) {
+  if (conflict || authLoading) { updateSelectionView(); return; }
+  let count = selectRows().reduce((sum, row) => sum + Number(row.quantity), 0);
+  let limited = false;
+  for (const row of rows) {
+    if (!checked) { selected.delete(row.id); continue; }
+    if (selected.has(row.id) || row.status !== 'draft') continue;
+    const quantity = Number(row.quantity);
+    if (!Number.isSafeInteger(quantity) || quantity < 1 || count + quantity > 20) { limited = true; continue; }
+    selected.add(row.id); count += quantity;
+  }
+  updateSelectionView();
+  if (limited) toast('最多选择 20 件，超出数量的明细未勾选');
 }
 function imageNode(row) {
   if (row.image)
@@ -575,14 +613,9 @@ function renderRowsOnly() {
     type: "checkbox",
     "aria-label": "选择本页待处理明细",
     checked: eligible.length > 0 && eligible.every((r) => selected.has(r.id)),
-    disabled: !eligible.length,
-    onChange: (e) => {
-      eligible.forEach((r) =>
-        e.target.checked ? selected.add(r.id) : selected.delete(r.id),
-      );
-      renderRowsOnly();
-      renderSide();
-    },
+    disabled: !eligible.length || conflict,
+    "data-select-page": JSON.stringify(eligible.map(r => r.id)),
+    onChange: (e) => selectPageItems(eligible, e.target.checked),
   });
   all.indeterminate =
     eligible.some((r) => selected.has(r.id)) &&
@@ -696,6 +729,8 @@ function inline(r, key, label, cls = "", type = "text") {
     type,
     class: cls,
     "aria-label": `${r.seq} ${label}`,
+    "data-row-id": r.id,
+    "data-field": key,
     title: ["discount", "rate"].includes(key)
       ? r[key] === ""
         ? "跟随顶部设置；填写后单独设置"
@@ -731,9 +766,26 @@ function inline(r, key, label, cls = "", type = "text") {
         toast(err);
         return;
       }
+      if (key === "quantity" && selected.has(r.id) && selectRows().reduce((n,row) => n + Number(row.quantity), 0) > 20) {
+        selected.delete(r.id);
+        toast("该明细数量变更后超过 20 件，已取消勾选");
+      }
       persist();
-      renderRowsOnly();
-      renderSide();
+      // Preserve an in-flight click when a changed field loses focus to a checkbox.
+      if (tab === "details") {
+        const desktop = $$('tr[data-row-id]').find(n => n.dataset.rowId === r.id);
+        if (desktop) {
+          const fresh = rowNode(r);
+          [...desktop.children].slice(1).forEach((cell, i) => cell.replaceWith(fresh.children[1]));
+        }
+        const mobile = $$('article[data-mobile-row]').find(n => n.dataset.mobileRow === r.id);
+        if (mobile) {
+          const fresh = mobileRecord(r, false);
+          mobile.querySelector('header strong').textContent = r.customer || '未填客户';
+          [...mobile.children].slice(1).forEach(child => child.replaceWith(fresh.children[1]));
+        }
+        updateSelectionView();
+      } else { renderRowsOnly(); renderSide(); }
     },
   });
 }
@@ -901,7 +953,7 @@ function renderBillingRows() {
 function rowNode(r) {
   return h(
     "tr",
-    { class: selected.has(r.id) ? "selected" : "" },
+    { class: selected.has(r.id) ? "selected" : "", "data-row-id": r.id },
     h(
       "td",
       {},
@@ -909,12 +961,10 @@ function rowNode(r) {
         type: "checkbox",
         "aria-label": `选择第 ${r.seq} 行`,
         checked: selected.has(r.id),
-        disabled: r.status !== "draft",
-        onChange: (e) => {
-          e.target.checked ? selected.add(r.id) : selected.delete(r.id);
-          renderRowsOnly();
-          renderSide();
-        },
+        disabled: r.status !== "draft" || conflict,
+        "data-select-row": r.id,
+        title: r.status !== "draft" ? "此明细已交接或已下单，请先在批次记录撤回，避免重复加购" : "选择该条明细",
+        onChange: (e) => selectItems([r], e.target.checked),
       }),
     ),
     h("td", { class: "muted mono" }, r.seq),
@@ -1047,8 +1097,7 @@ function renderSide() {
       "取消全部勾选",
       () => {
         selected.clear();
-        renderContent();
-        renderSide();
+        updateSelectionView();
       },
       "ghost",
       { disabled: !rows.length },
@@ -1199,23 +1248,8 @@ function editRow(existing) {
     errorBox(),
   );
   const actions = [btn("关闭", () => $("#dialog").close())];
-  if (existing && !locked)
-    actions.unshift(
-      btn(
-        "删除明细",
-        () => {
-          undo = structuredClone(r);
-          state.rows = state.rows.filter((x) => x.id !== r.id);
-          selected.delete(r.id);
-          persist();
-          $("#dialog").close();
-          renderContent();
-          renderSide();
-          toast("已删除，可在使用说明中撤销最近一次删除");
-        },
-        "ghost danger",
-      ),
-    );
+  if (existing)
+    actions.unshift(btn("删除该条明细", () => confirmDeleteRow(r), "ghost danger"));
   if (!locked)
     actions.push(
       btn(
@@ -1271,6 +1305,7 @@ function editRow(existing) {
           }
           if (existing) Object.assign(existing, v);
           else state.rows.push(v);
+          if (selected.has(v.id) && selectRows().reduce((n,row) => n + Number(row.quantity), 0) > 20) selected.delete(v.id);
           persist();
           $("#dialog").close();
           renderContent();
@@ -1281,6 +1316,61 @@ function editRow(existing) {
       ),
     );
   modal(existing ? `编辑明细 · ${r.seq}` : "新增明细", form, actions);
+}
+function confirmDeleteRow(row) {
+  if (conflict || authLoading || (workspaceSync && !workspaceSync.ready))
+    return toast("请等待同步完成或刷新后再删除");
+  const dialog = $("#dialog"), editor = [...dialog.childNodes], epoch = authEpoch;
+  let deleting = false;
+  const cleanup = () => {
+    dialog.removeEventListener("cancel", cancel);
+    dialog.removeEventListener("close", cleanup);
+    dialog.removeAttribute("aria-describedby");
+  };
+  const restore = () => {
+    if (deleting) return;
+    cleanup();
+    dialog.replaceChildren(...editor);
+    [...dialog.querySelectorAll("button")].find(b => b.textContent === "删除该条明细")?.focus();
+  };
+  const cancel = event => { event.preventDefault(); restore(); };
+  const cancelButton = btn("取消", restore);
+  const error = h("p", {class:"error",role:"alert"});
+  const deleteButton = btn("删除明细", async () => {
+    if (deleting) return;
+    if (epoch !== authEpoch || conflict || authLoading || !db || (workspaceSync && !workspaceSync.ready)) {
+      error.textContent = "工作台状态已变化或存储不可用，请关闭弹窗并刷新后重试";
+      return;
+    }
+    const index = state.rows.indexOf(row);
+    if (index < 0) { error.textContent = "该明细已变化或已移除，请关闭弹窗后重新查看"; return; }
+    deleting = true; deleteButton.disabled = cancelButton.disabled = true;
+    deleteButton.setAttribute("aria-busy", "true");
+    state.rows.splice(index, 1);
+    let failure;
+    persist(e => { failure = e; });
+    await writeQueue;
+    if (epoch !== authEpoch) { cleanup(); return; }
+    if (failure) {
+      if (!state.rows.some(r => r.id === row.id)) state.rows.splice(Math.min(index,state.rows.length),0,row);
+      deleting = false; deleteButton.disabled = cancelButton.disabled = false;
+      deleteButton.removeAttribute("aria-busy");
+      error.textContent = "删除未保存，请重试。";
+      renderContent(); renderSide();
+      return;
+    }
+    selected.delete(row.id);
+    cleanup(); dialog.close();
+    renderContent(); renderSide();
+    toast("已删除该条明细");
+  }, "danger");
+  modal("确认删除这条明细？", h("div", {},
+    h("p", {id:"delete-detail-description"}, "删除后将从当前同步工作台移除，无法恢复。"), error
+  ), [cancelButton, deleteButton]);
+  dialog.setAttribute("aria-describedby", "delete-detail-description");
+  dialog.addEventListener("cancel", cancel);
+  dialog.addEventListener("close", cleanup);
+  cancelButton.focus();
 }
 function showImport() {
   const area = h("textarea", {
@@ -1904,17 +1994,6 @@ function showHelp() {
         {},
         "数据与图片保存在本机浏览器中，不会自动上传到网站。建议定期导出完整备份；CSV 只包含文字明细，不包含图片和批次记录。",
       ),
-      undo
-        ? btn("撤销最近一次删除", () => {
-            state.rows.push(undo);
-            undo = null;
-            persist();
-            $("#dialog").close();
-            renderContent();
-            renderSide();
-            toast("已恢复明细");
-          })
-        : null,
     ),
     [btn("知道了", () => $("#dialog").close(), "primary")],
   );
@@ -2110,10 +2189,13 @@ function localPut(key, value) {
 
 function applyCloudSnapshot(snapshot) {
   state = snapshot;
-  selected = new Set(
-    [...selected].filter((id) => state.rows.some((r) => r.id === id)),
-  );
-  undo = null;
+  let remaining = 20;
+  selected = new Set([...selected].filter(id => {
+    const row = state.rows.find(r => r.id === id);
+    const quantity = Number(row?.quantity);
+    if (!row || row.status !== "draft" || !Number.isSafeInteger(quantity) || quantity < 1 || quantity > remaining) return false;
+    remaining -= quantity; return true;
+  }));
   $("#merchant").value = state.settings.merchant;
   $("#discount").value = state.settings.discount;
   $("#rate").value = state.settings.rate;
@@ -2133,7 +2215,6 @@ async function changeAccount(user) {
   if (epoch !== authEpoch) return;
   authUser = user;
   selected.clear();
-  undo = null;
   query = "";
   filter = "all";
   page = 1;
@@ -2561,13 +2642,8 @@ function mobileRecords(visible, eligible) {
     "aria-label": "手机选择本页待处理明细",
     checked: eligible.length > 0 && eligible.every((r) => selected.has(r.id)),
     disabled: !eligible.length || conflict,
-    onChange: (e) => {
-      eligible.forEach((r) =>
-        e.target.checked ? selected.add(r.id) : selected.delete(r.id),
-      );
-      renderRowsOnly();
-      renderSide();
-    },
+    "data-select-page": JSON.stringify(eligible.map(r => r.id)),
+    onChange: (e) => selectPageItems(eligible, e.target.checked),
   });
   all.indeterminate =
     eligible.some((r) => selected.has(r.id)) &&
@@ -2645,11 +2721,9 @@ function mobileRecord(r, billing) {
           "aria-label": `手机选择第 ${r.seq} 行`,
           checked: selected.has(r.id),
           disabled: r.status !== "draft" || conflict,
-          onChange: (e) => {
-            e.target.checked ? selected.add(r.id) : selected.delete(r.id);
-            renderRowsOnly();
-            renderSide();
-          },
+          "data-select-row": r.id,
+          title: r.status !== "draft" ? "此明细已交接或已下单，请先撤回批次" : "选择该条明细",
+          onChange: (e) => selectItems([r], e.target.checked),
         }),
         h("strong", {}, r.customer || "未填客户"),
         h("span", { class: "muted" }, "#" + r.seq),
