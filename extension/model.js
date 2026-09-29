@@ -1,10 +1,10 @@
-import {getMerchant, directProductURL} from './merchants.js';
+import {getMerchant, directProductURL, sameMerchantOrigin} from './merchants.js';
 export const SHOP = 'https://www.petit-bateau.co.jp';
 export const WORKBENCH = 'https://qyc20250805.github.io/shidan/';
 export const sku = value => String(value || '').trim().toUpperCase();
 export const size = value => String(value || '').normalize('NFKC').trim().replace(/(?:cm|码|厘米)$/i, '').trim();
 export function shopURL(value, path, origin=SHOP) {
-  try { const u = new URL(value); return u.origin === origin && !u.username && !u.password && (!path || u.pathname.startsWith(path)) ? u.href : null; } catch { return null; }
+  try { const u = new URL(value); return sameMerchantOrigin(u.href,origin) && !u.username && !u.password && (!path || u.pathname.startsWith(path)) ? u.href : null; } catch { return null; }
 }
 export function validateBatch(batch) {
   if (!batch || typeof batch.id !== 'string' || batch.id.length > 100 || !getMerchant(batch.merchant)) throw Error('请选择已适配的四家商家网址');

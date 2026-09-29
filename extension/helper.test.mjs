@@ -23,8 +23,8 @@ test('cart confirmation requires exactly one intended SKU increment and no other
 });
 const adapters=fs.readFileSync(new URL('./adapters.js',import.meta.url),'utf8');
 const script=fs.readFileSync(new URL('./shop.js',import.meta.url),'utf8');
-async function productFixture(code='A0DV401090',image=row.image){
- const dom=new JSDOM(`<main><h1>商品</h1><div class="product-heading_PriceContainer__T"><span class="product-heading_Price__A product-heading_CompareAtPrice__C">￥11,000</span><span class="product-heading_Price__A product-heading_DiscountPrice__D">￥8,800<span> (税込)</span></span></div><h3>カラー ブルー</h3><img src="https://cdn.shopify.com/x.jpg"><input type="radio" value="36ヶ月 95cm"><div id="x-panel-description">商品番号： ${code}</div><button id="add">カートに入れる</button></main>`,{url:SHOP+'/products/test',runScripts:'outside-only'});
+async function productFixture(code='A0DV401090',image=row.image,options={}){
+ const dom=new JSDOM(`<main><h1>商品</h1><div class="product-heading_PriceContainer__T"><span class="product-heading_Price__A product-heading_CompareAtPrice__C">￥11,000</span><span class="product-heading_Price__A product-heading_DiscountPrice__D">￥8,800<span> (税込)</span></span></div><h3>カラー ブルー</h3><img src="https://cdn.shopify.com/x.jpg"><input type="radio" value="36ヶ月 95cm"><div id="x-panel-description">商品番号： ${code}</div><button id="add">カートに入れる</button></main>`,{url:(options.origin||SHOP)+'/products/test',runScripts:'outside-only'});
  const w=dom.window;const messages=[];let panel,clicks=0;
  const attach=w.HTMLElement.prototype.attachShadow;w.HTMLElement.prototype.attachShadow=function(o){panel=attach.call(this,o);return panel};
  w.HTMLElement.prototype.getClientRects=()=>[{}];
@@ -32,17 +32,15 @@ async function productFixture(code='A0DV401090',image=row.image){
  w.setTimeout=fn=>setTimeout(fn,0);
  w.chrome={runtime:{sendMessage:async m=>{messages.push(m);if(m.type==='SD_STATE')return{job:{id:'b1',index:0,stage:'product',merchant:MERCHANTS[0],item:{...row,image,added:0},product:SHOP+'/products/test'}};return m.type==='SD_ARM'?{armed:true}:{ok:true}}}};
  w.document.querySelector('#add').onclick=()=>clicks++;
- w.eval(adapters);w.eval(script);await new Promise(r=>setTimeout(r,120));
+ w.eval(adapters);if(options.disabled)w.document.querySelector('input').disabled=true;if(options.ambiguous)w.ShidanAdapters.petit.choices=async()=>[{},{}];if(!options.adapterOnly)w.eval(script);await new Promise(r=>setTimeout(r,120));
  return{w,messages,get panel(){return panel},get clicks(){return clicks}};
 }
-test('product adapter requires explicit image confirmation before one cart click',async()=>{
- const f=await productFixture();assert.equal(f.clicks,0);const check=f.panel.querySelector('input');assert.ok(check);check.checked=true;check.dispatchEvent(new f.w.Event('change'));await new Promise(r=>setTimeout(r,20));
- const confirm=[...f.panel.querySelectorAll('button')].find(b=>b.textContent.includes('确认一致'));
- confirm.click();confirm.click();await new Promise(r=>setTimeout(r,30));assert.equal(f.clicks,1);assert.equal(f.messages.filter(m=>m.type==='SD_ARM').length,1);assert.ok(f.messages.some(m=>m.type==='SD_GO_CART'));
- f.w.close();
+test('unique SKU and available size automatically add exactly once without manual input',async()=>{
+ const f=await productFixture();assert.equal(f.clicks,1);assert.equal(f.messages.filter(m=>m.type==='SD_ARM').length,1);assert.ok(f.messages.some(m=>m.type==='SD_GO_CART'));assert.ok(f.w.document.querySelector('input').checked);f.w.close();
 });
 test('mismatched SKU stops without cart click',async()=>{const f=await productFixture('A0DV401070');assert.equal(f.clicks,0);assert.ok(f.messages.some(m=>m.type==='SD_REVIEW'));f.w.close();});
-test('image mismatch stops without cart click',async()=>{const f=await productFixture();[...f.panel.querySelectorAll('button')].find(b=>b.textContent.startsWith('不一致')).click();await new Promise(r=>setTimeout(r,10));assert.equal(f.clicks,0);assert.ok(f.messages.some(m=>m.type==='SD_REVIEW'));f.w.close();});
+test('sold-out and ambiguous variants stop without a cart click',async()=>{for(const options of [{disabled:true},{ambiguous:true}]){const f=await productFixture(undefined,undefined,options);assert.equal(f.clicks,0);assert.ok(f.messages.some(m=>m.type==='SD_REVIEW'));f.w.close();}});
+test('www redirect to non-www product still automatically adds',async()=>{const f=await productFixture(undefined,undefined,{origin:SHOP.replace('www.','')});assert.equal(f.clicks,1);assert.ok(!f.messages.some(m=>m.type==='SD_REVIEW'));f.w.close();});
 
 test('four merchant detection, canonical search and total pieces',()=>{
  for(const m of MERCHANTS){assert.equal(getMerchant(m.origin+(m.id==='montbell'?'/jp/en/products':''))?.id,m.id);assert.ok(searchURL(m,'A B').includes('A%20B'));assert.ok(validateBatch({...batch,merchant:m.origin+(m.id==='montbell'?'/jp/en/products':''),items:[{...row,url:m.origin+m.productPrefix+'test'}]}));}
@@ -106,7 +104,7 @@ test('direct real product URL, queued next batch, retry and session recovery',as
  const job=()=>store.job;
  assert.equal(navigation[0].url,product);assert.equal(tabs.get(job().tabId).active,true);
  assert.equal(tabs.get(job().baselineTabId).active,false);
- const sender=(tabId,path)=>({id:'test',url:SHOP+path,tab:{id:tabId}});
+ const sender=(tabId,path)=>({id:'test',url:SHOP.replace('www.','')+path,tab:{id:tabId}});
  const msg=(type,data={})=>({type,id:job().id,index:job().index,...data});
  const before=tabs.size;await send({type:'SD_START',batch:first});assert.equal(tabs.size,before);
  await send(msg('SD_CART',{cart:{}}),sender(job().baselineTabId,'/cart'));assert.equal(job().stage,'product');assert.equal(job().product,product);
@@ -130,7 +128,7 @@ test('direct real product URL, queued next batch, retry and session recovery',as
 });
 
 test('PB webpage quote is current selling price, original is reference only; no client image required',async()=>{
- const f=await productFixture();const choices=await f.w.ShidanAdapters.petit.choices({...row,image:''});
+ const f=await productFixture(undefined,undefined,{adapterOnly:true});const choices=await f.w.ShidanAdapters.petit.choices({...row,image:''});
  const q=await choices[0].readPrice();assert.equal(q.price,8800);assert.equal(q.originalPrice,11000);assert.equal(q.currency,'JPY');assert.ok(q.readAt);assert.equal(f.clicks,0);
  f.w.document.querySelector('[class*="DiscountPrice__"]').textContent='￥8,800~';await assert.rejects(choices[0].readPrice(),/区间/);assert.equal(f.clicks,0);f.w.close();
 });
@@ -144,7 +142,12 @@ test('Montbell quote is scoped to chosen shipping region; ambiguous price does n
  const w=fixture(MERCHANTS[3],html,'/jp/en/products/detail/2301351');const [choice]=await w.ShidanAdapters.montbell.choices({...row,sku:'2301351',size:'M',color:'LGY'});await choice.activate();const q=await choice.readPrice();assert.equal(q.price,370);assert.equal(q.currency,'USD');assert.equal(q.originalPrice,null);w.document.querySelector('.display-price').textContent='370';await assert.rejects(choice.readPrice(),/币种/);w.close();
 });
 
-test('no customer image: automatically observes main image, quotes only after manual check, never auto-adds',async()=>{
- const f=await productFixture('A0DV401090','');assert.equal(f.panel.querySelectorAll('img').length,1);assert.ok(f.messages.some(m=>m.type==='SD_IMAGE'));assert.ok(!f.messages.some(m=>m.type==='SD_QUOTE'));assert.equal(f.clicks,0);
- const check=f.panel.querySelector('input');check.checked=true;check.dispatchEvent(new f.w.Event('change'));await new Promise(r=>setTimeout(r,30));assert.ok(f.messages.some(m=>m.type==='SD_QUOTE'&&m.quote.price===8800&&m.quote.currency==='JPY'));assert.equal(f.clicks,0);f.w.close();
+test('no customer image: main image and quote are archived before automatic add',async()=>{
+ const f=await productFixture('A0DV401090','');assert.ok(f.messages.some(m=>m.type==='SD_IMAGE'));assert.ok(f.messages.some(m=>m.type==='SD_QUOTE'&&m.quote.price===8800));assert.equal(f.clicks,1);assert.ok(f.messages.findIndex(m=>m.type==='SD_QUOTE')<f.messages.findIndex(m=>m.type==='SD_ARM'));f.w.close();
+});
+test('all four hosts accept only www aliases, not insecure origins, other ports or lookalikes',()=>{
+ for(const m of MERCHANTS){const url=m.origin.replace('www.','')+m.productPrefix+'test';assert.equal(getMerchant(url)?.id,m.id);assert.ok(validateBatch({...batch,merchant:m.origin+(m.id==='montbell'?'/jp/en/products':''),items:[{...row,url}]}));for(const bad of [url.replace('https:','http:'),url.replace('.com','.com.evil.test').replace('.co.jp','.co.jp.evil.test'),url.replace(m.productPrefix,':8443'+m.productPrefix)])assert.equal(getMerchant(bad),null);}
+});
+test('Shopify ambiguous SKU is rejected even if only one variant is in stock',async()=>{
+ const product={...panProduct,variants:[...panProduct.variants,{...panProduct.variants[0],id:222,available:false}]};const w=fixture(MERCHANTS[1],'<main></main>','/products/171777',async()=>({ok:true,json:async()=>product}));await assert.rejects(w.ShidanAdapters.shopify.choices({...row,sku:'171777',size:'80'}),/多个规格/);w.close();
 });

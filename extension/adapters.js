@@ -1,4 +1,5 @@
 (() => {
+ const sameOrigin=(a,b)=>{try{const x=new URL(a),y=new URL(b);return [x,y].every(u=>u.protocol==='https:'&&!u.port&&!u.username&&!u.password)&&x.hostname.replace(/^www\./,'')===y.hostname.replace(/^www\./,'');}catch{return false;}};
  const text=el=>(el?.textContent||'').trim();
  const normal=v=>String(v||'').normalize('NFKC').trim();
  const size=v=>normal(v).replace(/(?:cm|码|厘米)$/i,'').trim().toUpperCase();
@@ -11,7 +12,7 @@
   if(!response.ok){const e=Error(`商家返回 HTTP ${response.status}`);e.definitive=init.method==='POST'&&response.status>=400&&response.status<500;e.kind=e.definitive?'failed':'review';throw e;}
   return response.json();
  };
- const productPath=href=>{const u=new URL(href,location.origin);const match=u.pathname.match(/^\/products\/([^/]+)$/);return u.origin===location.origin&&match?'/products/'+match[1]:null;};
+ const productPath=href=>{const u=new URL(href,location.origin);const match=u.pathname.match(/^\/products\/([^/]+)$/);return sameOrigin(u.href,location.origin)&&match?'/products/'+match[1]:null;};
  // Price extraction is scoped to the selected product, never recommendations or a promotion percentage.
  const priceNumber=value=>{const t=normal(value).replace(/,/g,'');if(/[~〜～]/.test(t))throw Error('网页显示价格区间，无法确认当前售价');const values=t.match(/[0-9]+(?:\.[0-9]+)?/g);if(!values||values.length!==1)throw Error('网页售价无法唯一确认');return Number(values[0]);};
  const quote=(price,originalPrice,currency)=>{
@@ -37,12 +38,12 @@
  function pbState(){
   const main=document.querySelector('main');if(!main)return null;
   const description=main.querySelector('[id$="-panel-description"]');
-  const match=text(description).match(/商品番号\s*[：:]\s*([A-Za-z0-9-]+)/);
+  const codes=[...new Set([...text(description).matchAll(/商品番号\s*[：:]\s*([A-Za-z0-9-]+)/g)].map(m=>m[1].toUpperCase()))];
   const selected=[...main.querySelectorAll('input[type=radio]:checked')].find(el=>/cm/.test(el.value));
   const adds=[...main.querySelectorAll('button')].filter(el=>text(el)==='カートに入れる'&&visible(el));
   const color=[...main.querySelectorAll('h3')].find(el=>text(el).startsWith('カラー'));
   const photo=[...main.querySelectorAll('img')].find(el=>el.src.includes('cdn.shopify.com/')&&visible(el));
-  return {sku:match?.[1]?.toUpperCase(),size:selected?.value,add:adds.length===1?adds[0]:null,color:[...main.querySelectorAll('input[type=radio]:checked')].find(el=>!/cm/.test(el.value))?.value || text(color),photo:photo?.src};
+  return {sku:codes.length===1?codes[0]:null,size:selected?.value,add:adds.length===1?adds[0]:null,color:[...main.querySelectorAll('input[type=radio]:checked')].find(el=>!/cm/.test(el.value))?.value || text(color),photo:photo?.src};
  }
  function pbCheck(row){
   const p=pbState();if(!p||p.sku!==row.sku)throw Error('所选尺码的完整货号与订单不一致');
@@ -66,6 +67,7 @@
   const colorOption=product.options.find(o=>/^(カラー|color|colour|颜色)$/i.test(o.name));
   if(row.color&&colorOption)matches=matches.filter(v=>normal(v['option'+colorOption.position])===normal(row.color));
   if(!matches.length)throw Error('货号、颜色或尺码不一致');
+  if(matches.length!==1)throw Error('货号与目标尺码对应多个规格，需人工核对');
   matches=matches.filter(v=>v.available&&!v.requires_selling_plan&&(!v.quantity_rule||v.quantity_rule.min===1&&v.quantity_rule.increment===1));
   if(!matches.length)throw Error('目标尺码缺货或需要额外购买条件');return matches;
  }
@@ -102,7 +104,7 @@
  }
  const montbell={
   async mainImage(){const img=await wait(()=>document.querySelector("main input.colors-radio:checked")?.parentElement.querySelector("img[data-color-label]"));return new URL(img.dataset.image_url_origin||img.src,location.origin).href;},
-  async search(row){await wait(()=>document.querySelector('main a[href*="/products/detail/"]'));const links=[...document.querySelectorAll('main a[href*="/products/detail/"]')].map(a=>new URL(a.href)).filter(u=>u.origin===location.origin&&u.pathname==='/jp/en/products/detail/'+row.sku);const paths=[...new Set(links.map(u=>u.origin+u.pathname))];if(paths.length!==1)throw Error('Montbell 货号搜索无法唯一确认');return paths[0];},
+  async search(row){await wait(()=>document.querySelector('main a[href*="/products/detail/"]'));const links=[...document.querySelectorAll('main a[href*="/products/detail/"]')].map(a=>new URL(a.href)).filter(u=>sameOrigin(u.href,location.origin)&&u.pathname==='/jp/en/products/detail/'+row.sku);const paths=[...new Set(links.map(u=>u.origin+u.pathname))];if(paths.length!==1)throw Error('Montbell 货号搜索无法唯一确认');return paths[0];},
   async cart(){return wait(()=>{const main=document.querySelector('main');if(!main||!main.querySelector('#checkout-button'))return null;const entries=[...main.querySelectorAll('.cart-item[data-group-detail-id]')];const map={};for(const entry of entries){const code=text(entry.querySelector('[data-product-code]')).replace(/^#/,'');const url=entry.querySelector('a[href*="/products/detail/"]')?.href;const color=url?new URL(url).searchParams.get('color'):null;const siz=entry.querySelector('[data-size] [data-text]')?.getAttribute('data-text');const select=entry.querySelector('select.select-quantity[data-sfc]');const qty=Number(select?.value);if(!code||!color||!siz||!select||!Number.isSafeInteger(qty)||qty<1)return null;const key=montKey(code,color,siz,select.dataset.sfc);map[key]=(map[key]||0)+qty;}
    if(!entries.length){const count=[...document.querySelectorAll('header a, [role=banner] a, nav a')].find(a=>new URL(a.href,location.origin).pathname==='/jp/en/products/cart'&&text(a)==='0');if(!main.querySelector('#checkout-button').disabled||!count)return null;}return map;});},
   async choices(row){
@@ -114,5 +116,5 @@
    return options.map(c=>({label:`${row.sku} · ${row.size} · ${c.img.dataset.colorLabel} ${c.img.alt}`,photo:new URL(c.img.dataset.image_url_origin||c.img.src,location.origin).href,key:null,readPrice:async function(){const p=montCheck(row,c.img.dataset.colorLabel);if(p.key!==this.key)throw Error('发货区域已变化');return montPrice(p.add);},activate:async function(){c.radio.click();await sleep(1200);const qty=document.querySelector('select#quantity');if(qty&&[...qty.options].some(o=>o.value==='1')){qty.value='1';qty.dispatchEvent(new Event('change',{bubbles:true}));}await wait(()=>[...document.querySelectorAll('main a.add-to-cart[data-shipping_from]')].some(visible));const current=montCheck(row,c.img.dataset.colorLabel);this.key=current.key;this.shipping=current.shipping;},validate:async function(){const p=montCheck(row,c.img.dataset.colorLabel);if(p.key!==this.key)throw Error('发货区域已变化');},add:async()=>montCheck(row,c.img.dataset.colorLabel).add.click()}));
   }
  };
- globalThis.ShidanAdapters={petit,shopify,montbell,variants,montKey};
+ globalThis.ShidanAdapters={petit,shopify,montbell,variants,montKey,sameOrigin};
 })();

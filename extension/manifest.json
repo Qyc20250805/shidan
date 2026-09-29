@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "拾单 · 四商家加购助手",
   "version": "0.4.0",
-  "description": "按货号查找、严格核对尺码，人工确认图片后加入购物车；不下单、不支付。",
+  "description": "货号唯一匹配且目标尺码有货时自动加入购物车，无法确认则停止；不下单、不支付。",
   "permissions": [
     "storage"
   ],
@@ -11,7 +11,11 @@
     "https://www.panpantutu.com/*",
     "https://www.mikihouse.co.jp/*",
     "https://www.montbell.com/jp/en/products*",
-    "https://qyc20250805.github.io/shidan/*"
+    "https://qyc20250805.github.io/shidan/*",
+    "https://petit-bateau.co.jp/*",
+    "https://panpantutu.com/*",
+    "https://mikihouse.co.jp/*",
+    "https://montbell.com/jp/en/products*"
   ],
   "background": {
     "service_worker": "background.js",
@@ -35,7 +39,11 @@
         "https://www.petit-bateau.co.jp/*",
         "https://www.panpantutu.com/*",
         "https://www.mikihouse.co.jp/*",
-        "https://www.montbell.com/jp/en/products*"
+        "https://www.montbell.com/jp/en/products*",
+        "https://petit-bateau.co.jp/*",
+        "https://panpantutu.com/*",
+        "https://mikihouse.co.jp/*",
+        "https://montbell.com/jp/en/products*"
       ],
       "js": [
         "adapters.js",

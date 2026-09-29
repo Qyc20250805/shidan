@@ -1,4 +1,4 @@
-import {getMerchant, searchURL, directProductURL, itemURL} from './merchants.js';
+import {sameMerchantOrigin, getMerchant, searchURL, directProductURL, itemURL} from './merchants.js';
 import {SHOP, WORKBENCH, validateBatch, shopURL, verifyCart, view, sku, safeImage, validQuote} from './model.js';
 let queue = Promise.resolve();
 const read = async () => (await chrome.storage.local.get('job')).job;
@@ -55,7 +55,7 @@ async function review(job, reason, status='review') {
 async function handle(m, sender) {
   if (sender.id !== chrome.runtime.id) throw Error('来源无效');
   let job=await read();
-  if (m.type==='SD_HELLO' && fromApp(sender)) return {version:'0.4.0',pricing:'fixed-chain-v1'};
+  if (m.type==='SD_HELLO' && fromApp(sender)) return {version:'0.4.0',pricing:'fixed-chain-v1',automatic:'unique-sku-v1'};
   if (m.type==='SD_START' && fromApp(sender)) {
     validateBatch(m.batch);
     if (job?.id === m.batch.id) return {result:view(job)};
@@ -118,11 +118,11 @@ async function handle(m, sender) {
     job.product=directProductURL(r.url,job.merchant);job.stage=job.product?'product':'search';
     await navigate(job,job.product || searchURL(job.merchant,r.sku)); return {ok:true};
   }
-  if(m.type==='SD_PRODUCT' && job.stage==='search' && new URL(sender.url).href.startsWith(job.merchant.origin+job.merchant.searchPath.split('?')[0])) {
+  if(m.type==='SD_PRODUCT' && job.stage==='search' && sameMerchantOrigin(sender.url,job.merchant.origin) && new URL(sender.url).pathname.startsWith(job.merchant.searchPath.split('?')[0])) {
     if(!shopURL(m.url,job.merchant.productPrefix,job.merchant.origin)) throw Error('商品地址无效');
     job.product=m.url;job.stage='product';await navigate(job,m.url);return {ok:true};
   }
-  const onProduct=sender.tab.id===job.tabId && job.stage==='product' && new URL(sender.url).origin===job.merchant.origin && new URL(sender.url).pathname===new URL(job.product).pathname;
+  const onProduct=sender.tab.id===job.tabId && job.stage==='product' && sameMerchantOrigin(sender.url,job.merchant.origin) && new URL(sender.url).pathname===new URL(job.product).pathname;
   if(m.type==='SD_IMAGE' && onProduct){
     if(!safeImage(m.image) || !m.image.startsWith('https://'))throw Error('网页主图无法读取');
     r.webImage=m.image;await publish(job);return {ok:true};
@@ -132,7 +132,7 @@ async function handle(m, sender) {
     r.quote={price:m.quote.price,originalPrice:m.quote.originalPrice,currency:m.quote.currency,url:m.quote.url,readAt:m.quote.readAt};
     await publish(job);return {ok:true};
   }
-  if(m.type==='SD_ARM' && sender.tab.id===job.tabId && job.stage==='product' && new URL(sender.url).origin===job.merchant.origin && new URL(sender.url).pathname===new URL(job.product).pathname && m.sku===r.sku) {
+  if(m.type==='SD_ARM' && sender.tab.id===job.tabId && job.stage==='product' && sameMerchantOrigin(sender.url,job.merchant.origin) && new URL(sender.url).pathname===new URL(job.product).pathname && m.sku===r.sku) {
     const key=m.key || r.sku;
     if(!/^[A-Za-z0-9:%._-]{1,240}$/.test(key) || (job.merchant.type==='petit' && key!==r.sku) || (job.merchant.type==='shopify' && !/^V:[0-9]+$/.test(key)) || (job.merchant.type==='montbell' && !key.startsWith('M:'+r.sku+':'))) throw Error('购物车核验标识无效');
     if(!r.quote || !validQuote(m.quote,job.product) || ['price','originalPrice','currency'].some(k=>m.quote[k]!==r.quote[k]))throw Error('网页价格已变化，请重新核对');

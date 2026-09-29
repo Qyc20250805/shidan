@@ -24,54 +24,29 @@
    if(job.stage==='verify'){await send('SD_GO_CART');return;}
    if(job.stage==='search'){
     const found=await adapter.search(job.item);const target=new URL(found);
-    if(job.item.url){const expected=new URL(job.item.url);if(expected.origin!==target.origin||expected.pathname!==target.pathname)throw Error('订单链接与货号搜索结果不一致');}
+    if(job.item.url){const expected=new URL(job.item.url);if(!globalThis.ShidanAdapters.sameOrigin(expected.href,target.href)||expected.pathname!==target.pathname)throw Error('订单链接与货号搜索结果不一致');}
     await send('SD_PRODUCT',{url:found});return;
    }
    const target=new URL(job.product);
-   if(job.stage!=='product'||location.origin!==target.origin||location.pathname!==target.pathname)throw Error('商家页面已改变，请人工核对');
+   if(job.stage!=='product'||!globalThis.ShidanAdapters.sameOrigin(location.href,target.href)||location.pathname!==target.pathname)throw Error('商家页面已改变，请人工核对');
    const mainImage=await adapter.mainImage();
    if(!mainImage||!mainImage.startsWith('https://'))throw Error('网页主图无法读取');
    await send('SD_IMAGE',{image:mainImage});
    const choices=await adapter.choices(job.item);if(!choices.length)throw Error('没有可确认的商品规格');
-   panel.replaceChildren(el('h2','请核对图片、颜色和尺码'));
-   panel.append(el('p',`${job.merchant.name} · 订单 ${job.item.sku} · ${job.item.size} · ${job.item.quantity}件（已加 ${job.item.added}）`));
-   if(job.item.color)panel.append(el('p','订单颜色：'+job.item.color));
-   const select=el('select');select.setAttribute('aria-label','选择与订单图片一致的颜色规格');select.append(el('option','请选择与订单图片一致的颜色规格'));select.options[0].value='';
-   choices.forEach((c,i)=>{const o=el('option',c.label);o.value=String(i);select.append(o);});panel.append(select);
-   const detail=el('p','请先选择规格');panel.append(detail);
-   const photos=el('div');photos.style.display='flex';photos.style.gap='8px';
-   const order=el('img'),web=el('img');order.alt='订单图片';web.alt='网站图片';if(job.item.image)order.src=job.item.image;
-   for(const [caption,img] of [['网页主图',web]]){const fig=el('figure');fig.append(img,el('figcaption',caption));photos.append(fig);}panel.append(photos);
-   const label=el('label'),check=el('input');check.type='checkbox';label.append(check,document.createTextNode(' 我已核对货号、目标尺码、网页主图与所需款式一致'));panel.append(label);
-   const confirm=el('button','确认一致，加入 1 件'),skip=el('button','不一致 / 无法确认，跳过');confirm.disabled=true;panel.append(confirm,skip,el('p','不一致时必须跳过。不会进入结账或付款。'));
-   let choice=null,activating=false,checking=false,verifiedQuote=null;
-   const ready=()=>{confirm.disabled=acted||activating||!choice||!check.checked||checking||!verifiedQuote||[web].some(i=>!i.complete||!i.naturalWidth);};
-   order.onload=web.onload=ready;
-   web.onerror=async()=>{if(acted)return;acted=true;confirm.disabled=true;await fail(Error('网页主图或历史参考图片加载失败，无法核对'));};
-   check.onchange=async()=>{
-    verifiedQuote=null;ready();if(!check.checked||!choice||checking||activating)return;
-    checking=true;check.disabled=select.disabled=true;ready();
-    try{
-     if([web].some(i=>!i.complete||!i.naturalWidth))throw Error('主图尚未加载完成，请人工核对');
-     await choice.validate();const q=await choice.readPrice();q.url=job.product;
-     await send('SD_IMAGE',{image:choice.photo});await send('SD_QUOTE',{quote:q});verifiedQuote=q;
-     detail.textContent=choice.label+' · 网页当前售价 '+q.price+' '+q.currency+'（已回写拾单）';
-    }catch(e){acted=true;await fail(e);}
-    finally{checking=false;check.disabled=select.disabled=acted;ready();}
-   };
-   select.onchange=async()=>{
-    if(acted||activating||checking)return;choice=null;verifiedQuote=null;check.checked=false;ready();if(select.value==='')return;
-    activating=true;select.disabled=true;const candidate=choices[Number(select.value)];
-    try{await candidate.activate();if(acted)return;await candidate.validate();if(acted)return;if(!candidate.photo)throw Error('网页主图无法读取，需人工核对');choice=candidate;web.src=candidate.photo;detail.textContent=candidate.label+(candidate.shipping?' · '+candidate.shipping:'');}
-    catch(e){acted=true;skip.disabled=true;await fail(e);}
-    finally{activating=false;select.disabled=acted;ready();}
-   };
-   skip.onclick=async()=>{if(acted)return;acted=true;skip.disabled=select.disabled=check.disabled=true;ready();await fail(Error('用户核对图片、颜色或尺码不一致 / 无法确认'));};
-   confirm.onclick=async()=>{
-    if(acted||confirm.disabled||!choice)return;acted=true;confirm.disabled=skip.disabled=select.disabled=check.disabled=true;
-    try{await choice.validate();const latest=await choice.readPrice();latest.url=job.product;if(['price','originalPrice','currency'].some(k=>latest[k]!==verifiedQuote[k]))throw Error('网页价格已变化，请重新核对');const armed=await send('SD_ARM',{sku:job.item.sku,key:choice.key,quote:latest});if(!armed.armed)throw Error('批次已停止');await choice.validate();await choice.add();status('正在核验购物车；结果不明不会重复加购…');await sleep(5000);await send('SD_GO_CART');}catch(e){await fail(e);}
-   };
-   if(choices.length===1){select.value='0';await select.onchange();}
+   if(choices.length!==1)throw Error('货号与目标尺码对应多个规格，需人工核对');
+   const choice=choices[0];
+   await choice.activate();await choice.validate();
+   if(!choice.photo||!choice.photo.startsWith('https://'))throw Error('网页主图无法读取');
+   const quote=await choice.readPrice();quote.url=job.product;
+   await send('SD_IMAGE',{image:choice.photo});await send('SD_QUOTE',{quote});
+   status('货号唯一匹配，目标尺码有货，正在自动加入 1 件…');
+   await choice.validate();const latest=await choice.readPrice();latest.url=job.product;
+   if(['price','originalPrice','currency'].some(k=>latest[k]!==quote[k]))throw Error('网页价格已变化，无法确认当前商品');
+   if(acted)return;
+   const armed=await send('SD_ARM',{sku:job.item.sku,key:choice.key,quote:latest});
+   if(!armed.armed)throw Error('批次已停止');
+   acted=true;await choice.validate();await choice.add();
+   status('正在核验购物车；结果不明不会重复加购…');await sleep(5000);await send('SD_GO_CART');
   }catch(e){if(job)await fail(e);}
   finally{running=false;}
  }
