@@ -8,3 +8,17 @@ export function getMerchant(value) {
  try { const u=new URL(value);if(u.username||u.password)return null;return MERCHANTS.find(m=>u.origin===m.origin&&(m.id!=='montbell'||u.pathname.startsWith('/jp/en/products'))) || null; } catch {return null;}
 }
 export function searchURL(merchant,code){return merchant.origin+merchant.searchPath+encodeURIComponent(code)+(merchant.type==='shopify'?'&type=product':'');}
+
+// Only an actual product URL on the selected merchant is a direct cart target.
+// Image files and home pages cannot identify a purchasable variant.
+export function directProductURL(value, merchant) {
+ try {
+  const u = new URL(value);
+  if (!merchant || u.origin !== merchant.origin || u.username || u.password) return null;
+  if (!u.pathname.startsWith(merchant.productPrefix) || !u.pathname.slice(merchant.productPrefix.length).replace(/\/$/, '') || /\.(?:jpe?g|png|gif|webp|svg)$/i.test(u.pathname)) return null;
+  u.hash = ''; return u.href;
+ } catch { return null; }
+}
+export function itemURL(row, merchant) {
+ return directProductURL(row.url || row.productUrl || row.imageUrl, merchant) || searchURL(merchant, row.sku);
+}

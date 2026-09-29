@@ -22,7 +22,7 @@ import {
   csvCell,
   productUrl,
   round,
-} from "./core.js";
+} from "./core.js?cart-retry=1";
 const $ = (s) => document.querySelector(s),
   $$ = (s) => [...document.querySelectorAll(s)];
 const h = (tag, attrs = {}, ...children) => {
@@ -208,7 +208,7 @@ function selectItems(rows, checked) {
   let limited = false;
   for (const row of rows) {
     if (!checked) { selected.delete(row.id); continue; }
-    if (selected.has(row.id) || row.status !== 'draft') continue;
+    if (selected.has(row.id)) continue;
     const quantity = Number(row.quantity);
     if (!Number.isSafeInteger(quantity) || quantity < 1 || count + quantity > 20) { limited = true; continue; }
     selected.add(row.id); count += quantity;
@@ -608,10 +608,10 @@ function renderRowsOnly() {
   const list = filtered();
   page = Math.max(1, Math.min(page, Math.ceil(list.length / 20) || 1));
   const visible = list.slice((page - 1) * 20, page * 20);
-  const eligible = visible.filter((r) => r.status === "draft");
+  const eligible = visible;
   const all = h("input", {
     type: "checkbox",
-    "aria-label": "选择本页待处理明细",
+    "aria-label": "选择本页明细",
     checked: eligible.length > 0 && eligible.every((r) => selected.has(r.id)),
     disabled: !eligible.length || conflict,
     "data-select-page": JSON.stringify(eligible.map(r => r.id)),
@@ -961,9 +961,9 @@ function rowNode(r) {
         type: "checkbox",
         "aria-label": `选择第 ${r.seq} 行`,
         checked: selected.has(r.id),
-        disabled: r.status !== "draft" || conflict,
+        disabled: conflict,
         "data-select-row": r.id,
-        title: r.status !== "draft" ? "此明细已交接或已下单，请先在批次记录撤回，避免重复加购" : "选择该条明细",
+        title: "选择该条明细，可重新发起一次加购",
         onChange: (e) => selectItems([r], e.target.checked),
       }),
     ),
@@ -1019,6 +1019,7 @@ function rowNode(r) {
         { class: `badge ${r.status}`, title: r.helper?.reason || "" },
         helperStatus(r),
       ),
+      r.helper?.reason ? h("small", {class:"muted"}, r.helper.reason) : null,
     ),
     h(
       "td",
@@ -1616,8 +1617,8 @@ function helperRequest(type, data = {}, timeout = 8000) {
   });
 }
 function helperStatus(r) {
-  if (r.status !== "handoff") return {draft:"待处理",ordered:"已下单"}[r.status] || "已交接";
-  return { pending: '加购处理中', added: '已加购', review: '需人工核对', failed: '加购失败' }[r.helper?.status] || { draft: '待处理', handoff: '已交接', ordered: '已下单' }[r.status];
+  if (r.helper) return {pending:'待人工核对',added:'已处理',review:'需人工核对',failed:'加购失败'}[r.helper.status] || '可重新加购';
+  return {draft:'待处理',handoff:'已交接',ordered:'已下单'}[r.status] || '待处理';
 }
 function applyHelperResult(result) {
   if (conflict || !result || !Array.isArray(result.items)) return;
@@ -1628,11 +1629,24 @@ function applyHelperResult(result) {
   for (const update of result.items) {
     const row = state.rows.find(r => r.id === update.id && r.batchId === batch.id);
     const original = batch.rows.find(r => r.id === update.id);
-    if (!row || !original || !['pending','added','review','failed'].includes(update.status) || !Number.isSafeInteger(update.added) || update.added < 0 || update.added > original.quantity) continue;
-    const next = { status: update.status, added: update.added, reason: String(update.reason || '').slice(0,180) };
-    if (JSON.stringify(row.helper) !== JSON.stringify(next)) { row.helper = next; original.helper = {...next}; changed = true; }
+    if (!original || !['pending','added','review','failed'].includes(update.status) || !Number.isSafeInteger(update.added) || update.added < 0 || update.added > original.quantity) continue;
+    const reason = update.reason || (update.status==='pending' ? (result.phase==='queued'?'商品页已打开，等待上一批完成；可继续选单':'请在商品页核对图片、颜色和尺码；可继续选单') : '');
+    const next = {status:update.status,added:update.added,reason:String(reason).slice(0,180)};
+    if (JSON.stringify(original.helper)!==JSON.stringify(next)) {original.helper={...next};changed=true;}
+    if (row && JSON.stringify(row.helper)!==JSON.stringify(next)) {row.helper=next;changed=true;}
   }
   if (changed) { persist(); renderContent(); renderSide(); }
+}
+function disconnectedHelper(ids, reason) {
+  for(const id of ids){
+    const batch=state.batches.find(b=>b.id===id&&b.helper&&!b.helperDone);
+    if(!batch)continue;
+    applyHelperResult({id,done:true,items:batch.rows.map(original=>{
+      const row=state.rows.find(r=>r.id===original.id&&r.batchId===id);
+      const prior=row?.helper || original.helper || {status:'pending',added:0};
+      return {id:original.id,...prior,...(prior.status==='pending'?{status:'review',reason}: {})};
+    })});
+  }
 }
 if (typeof window !== 'undefined') {
   window.addEventListener('message', event => {
@@ -1641,19 +1655,22 @@ if (typeof window !== 'undefined') {
     if (pending) { clearTimeout(pending.timer); helperRequests.delete(message.requestId); message.error ? pending.reject(Error(message.error)) : pending.resolve(message); }
     if (message.result) applyHelperResult(message.result);
     if (Array.isArray(message.results)) message.results.forEach(applyHelperResult);
+    if (Array.isArray(message.missingIds)) disconnectedHelper(message.missingIds, '未找到加购会话，请核对购物车后重新发起');
   });
   const pollHelper = () => {
     const ids = state.batches.filter(b => b.helper && b.status === 'handoff').map(b => b.id);
-    if (ids.length) helperRequest('SD_POLL', { ids }).catch(() => {});
+    if (ids.length) helperRequest('SD_POLL', { ids }).catch(() => disconnectedHelper(ids, '助手未连接，结果未确认；请核对购物车后重试')); 
   };
   window.addEventListener('focus', pollHelper);
+  window.addEventListener('pageshow', pollHelper);
+  document.addEventListener('visibilitychange', () => {if(!document.hidden)pollHelper();});
   setInterval(() => { if (!document.hidden) pollHelper(); }, 5000);
 }
 function installHelper() {
   modal('安装 四商家加购助手', h('div', {},
     h('p', {}, '请使用电脑 Chrome。下载并解压安装包，文件夹第一层应包含 manifest.json。'),
     h('p', {}, '打开 chrome://extensions，开启“开发者模式”，点击“加载已解压的扩展程序”，选择解压文件夹。安装或更新后刷新拾单及商家页面。'),
-    h('a', {href:'./shidan-helper.zip?v=0.3.0',download:'shidan-helper.zip',class:'primary'}, '下载 Chrome 扩展安装包'),
+    h('a', {href:'./shidan-helper.zip?v=0.4.0',download:'shidan-helper.zip',class:'primary'}, '下载 Chrome 扩展安装包'),
     h('p', {class:'help'}, '已有旧版请移除旧版再加载此版本，避免两个助手同时工作。每件必须人工确认图片、颜色和尺码；仅加购物车，不提交订单、不付款。')
   ), [btn('关闭', () => $('#dialog').close())]);
 }
@@ -1667,7 +1684,8 @@ async function startHelper() {
   const epoch = authEpoch;
   helperStarting = true;
   try {
-    await helperRequest('SD_HELLO');
+    const hello = await helperRequest('SD_HELLO');
+    if (hello.version !== '0.4.0') throw Error('请先安装加购助手 v0.4.0，再刷新拾单页面');
     if (epoch !== authEpoch || conflict) throw Error('工作台已切换，请重新选择商品');
     const current = selectRows();
     const problem = batchCheck(current, state.settings); if (problem) throw Error(problem);
@@ -1675,21 +1693,23 @@ async function startHelper() {
     const payload = batchFile(batch);
     // Persist the batch identity before dispatch, so a reload can recover its results.
     state.batches.unshift(batch);
-    for (const row of current) { const frozen = amounts(row, state.settings); row.discount = frozen.discount; row.rate = frozen.rate; row.status = 'handoff'; row.batchId = batch.id; row.helper = {status:'pending',added:0,reason:''}; }
+    for (const row of current) { row.batchId = batch.id; row.helper = {status:'pending',added:0,reason:'正在连接商品页，可继续选择其他明细'}; }
     selected.clear(); persist(); renderContent(); renderSide();
     try {
       const response = await helperRequest('SD_START', {batch:payload}, 20000);
       if (epoch === authEpoch) applyHelperResult(response.result);
-      toast('已打开商家网站，请在助手中逐件核对图片');
+      toast('已打开对应商品页，可返回拾单继续选单');
     } catch (error) {
       if (epoch === authEpoch) {
-        for (const row of current) row.helper = {status:'review',added:0,reason:'助手响应未确认，请先核对扩展与购物车，勿重复加购'};
+        for (const row of current) row.helper = {status:'failed',added:0,reason:error.message || '助手响应未确认，请核对购物车后重试'};
+        batch.helperDone = true;
+        for(const original of batch.rows) original.helper={...current.find(r=>r.id===original.id).helper};
         persist(); renderContent(); renderSide();
       }
       throw error;
     }
   } catch (error) { toast(error.message); }
-  finally { helperStarting = false; }
+  finally { helperStarting = false; if(epoch===authEpoch)renderSide(); }
 }
 
 function batchFile(batch) {
@@ -1705,7 +1725,7 @@ function batchFile(batch) {
       size: r.size,
       color: r.color,
       image: r.image,
-      url: r.url,
+      url: r.url || r.productUrl || r.imageUrl || "",
       quantity: r.quantity,
     })),
   };
@@ -2193,7 +2213,7 @@ function applyCloudSnapshot(snapshot) {
   selected = new Set([...selected].filter(id => {
     const row = state.rows.find(r => r.id === id);
     const quantity = Number(row?.quantity);
-    if (!row || row.status !== "draft" || !Number.isSafeInteger(quantity) || quantity < 1 || quantity > remaining) return false;
+    if (!row || !Number.isSafeInteger(quantity) || quantity < 1 || quantity > remaining) return false;
     remaining -= quantity; return true;
   }));
   $("#merchant").value = state.settings.merchant;
@@ -2654,7 +2674,7 @@ function mobileRecords(visible, eligible) {
       class: "mobile-only mobile-records",
       "aria-label": tab === "billing" ? "账单卡片" : "商品卡片",
     },
-    h("label", { class: "mobile-select-all" }, all, "选择本页待处理明细"),
+    h("label", { class: "mobile-select-all" }, all, "选择本页明细"),
     visible.length
       ? visible.map((r) => mobileRecord(r, tab === "billing"))
       : h(
@@ -2720,9 +2740,9 @@ function mobileRecord(r, billing) {
           type: "checkbox",
           "aria-label": `手机选择第 ${r.seq} 行`,
           checked: selected.has(r.id),
-          disabled: r.status !== "draft" || conflict,
+          disabled: conflict,
           "data-select-row": r.id,
-          title: r.status !== "draft" ? "此明细已交接或已下单，请先撤回批次" : "选择该条明细",
+          title: "选择该条明细，可重新发起一次加购",
           onChange: (e) => selectItems([r], e.target.checked),
         }),
         h("strong", {}, r.customer || "未填客户"),
@@ -2734,6 +2754,7 @@ function mobileRecord(r, billing) {
         helperStatus(r),
       ),
     ),
+    r.helper?.reason ? h("p", {class:"help"}, r.helper.reason) : null,
     h(
       "div",
       { class: "mobile-product" },

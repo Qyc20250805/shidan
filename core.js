@@ -88,8 +88,6 @@ export function productUrl(value) {
 }
 export function batchCheck(rows, settings) {
   if (!rows.length) return "请先勾选明细";
-  if (rows.some((r) => r.status !== "draft"))
-    return "已交接或已下单的明细不能重复推送";
   if (rows.reduce((n, r) => n + Number(r.quantity), 0) > MAX_ITEMS)
     return "本批超过 20 件，请调整数量或取消勾选";
   if (
