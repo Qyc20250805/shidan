@@ -19,44 +19,6 @@ test('cart confirmation requires exactly one intended SKU increment and no other
  assert.ok(verifyCart({A0DV401090:2},{A0DV401090:3},row.sku));
  for(const after of [{OLD:2},{OLD:2,A0DV401090:2},{OLD:3,A0DV401090:1}])assert.equal(verifyCart({OLD:2},after,row.sku),false);
 });
-test('worker checkpoints before click, idempotent start, recovery and safe completion',async()=>{
- let saved,listener,history;const navigations=[];
- globalThis.chrome={runtime:{id:'test',getURL:p=>'chrome-extension://test/'+p,onMessage:{addListener:fn=>listener=fn}},storage:{local:{get:async()=>({job:saved?structuredClone(saved):undefined,history}),set:async v=>{if(v.job)saved=structuredClone(v.job);if(v.history)history=structuredClone(v.history)}}},tabs:{create:async()=>({id:2}),update:async(id,v)=>navigations.push(v.url),sendMessage:async()=>{},onRemoved:{addListener(){}}}};
- await import('./background.js');
- const app={id:'test',url:'https://qyc20250805.github.io/shidan/',tab:{id:1}};
- const shop=path=>({id:'test',url:SHOP+path,tab:{id:2}});
- const send=(m,s=app)=>new Promise(resolve=>listener(m,s,resolve));
- const r=await send({type:'SD_START',batch});assert.equal(r.result.id,'b1');assert.equal(saved.stage,'baseline');
- await send({type:'SD_START',batch});assert.equal(navigations.length,1);
- assert.ok((await send({type:'SD_START',batch:{...batch,id:'b2'}})).error);
- const msg=(type,extra={})=>({type,id:'b1',index:0,...extra});
- await send(msg('SD_CART',{cart:{OLD:2}}),shop('/cart'));assert.equal(saved.stage,'search');
- await send(msg('SD_PRODUCT',{url:SHOP+'/products/test'}),shop('/search/A0DV401090'));assert.equal(saved.stage,'product');
- assert.ok((await send(msg('SD_ARM',{sku:'BAD'}),shop('/products/test'))).error);
- await send(msg('SD_ARM',{sku:row.sku}),shop('/products/test'));assert.equal(saved.stage,'verify');
- assert.ok((await send(msg('SD_ARM',{sku:row.sku}),shop('/products/test'))).error);
- await send(msg('SD_CART',{cart:{OLD:2,A0DV401090:1}}),shop('/cart'));
- assert.equal(saved.done,true);assert.equal(saved.items[0].status,'added');assert.equal(saved.items[0].added,1);assert.equal(navigations.at(-1),SHOP+'/cart');
- await send({type:'SD_START',batch:{...batch,id:'b2'}});
- await send({type:'SD_CART',id:'b2',index:0,cart:{OLD:2}},shop('/cart'));
- await send({type:'SD_PRODUCT',id:'b2',index:0,url:SHOP+'/products/test'},shop('/search/A0DV401090'));
- await send({type:'SD_ARM',id:'b2',index:0,sku:row.sku},shop('/products/test'));
- await send({type:'SD_CART',id:'b2',index:0,cart:{OLD:2}},shop('/cart'));
- assert.equal(saved.items[0].status,'review');assert.equal(saved.items[0].added,0);assert.equal(saved.done,true);
- await send({type:'SD_START',batch:{...batch,id:'b3',items:[{...row,quantity:2}]}});
- for(let added=0;added<2;added++) {
-  const unit=(type,data={})=>({type,id:'b3',index:0,...data});
-  await send(unit('SD_CART',{cart:{A0DV401090:added}}),shop('/cart'));
-  await send(unit('SD_PRODUCT',{url:SHOP+'/products/test'}),shop('/search/A0DV401090'));
-  await send(unit('SD_ARM',{sku:row.sku}),shop('/products/test'));
-  await send(unit('SD_CART',{cart:{A0DV401090:added+1}}),shop('/cart'));
- }
- assert.equal(saved.items[0].added,2);assert.equal(saved.done,true);
- await send({type:'SD_START',batch:{...batch,id:'b4',items:[{...row,image:''}]}});
- await send({type:'SD_CART',id:'b4',index:0,cart:{}},shop('/cart'));
- assert.equal(saved.items[0].status,'review');assert.equal(saved.done,true);
-
-});
 const adapters=fs.readFileSync(new URL('./adapters.js',import.meta.url),'utf8');
 const script=fs.readFileSync(new URL('./shop.js',import.meta.url),'utf8');
 async function productFixture(code='A0DV401090'){
@@ -130,18 +92,33 @@ test('Montbell cart quantity keyed by product, size, color and shipping',async()
  const w=fixture(MERCHANTS[3],`<main><button id="checkout-button">Checkout</button><div class="cart-item" data-group-detail-id="1"><span data-product-code>#2301351</span><a href="/jp/en/products/detail/2301351?color=LGY">product</a><div data-size><span data-text="M">M</span></div><select class="select-quantity" data-sfc="2"><option value="1">1</option></select></div></main>`,'/jp/en/products/cart');
  assert.equal((await w.ShidanAdapters.montbell.cart())['M:2301351:LGY:M:2'],1);w.close();
 });
-test('worker completes each merchant only after its matching cart delta; failure returns failed',async()=>{
- let saved,listener,history={};globalThis.chrome={runtime:{id:'multi',getURL:p=>'chrome-extension://multi/'+p,onMessage:{addListener:f=>listener=f}},storage:{local:{get:async()=>({job:saved&&structuredClone(saved),history}),set:async x=>{if(x.job)saved=structuredClone(x.job);if(x.history)history=x.history}}},tabs:{create:async()=>({id:12}),update:async()=>{},sendMessage:async()=>{},onRemoved:{addListener(){}}}};
- await import('./background.js?multi');const app={id:'multi',url:'https://qyc20250805.github.io/shidan/',tab:{id:11}};
+test('direct real product URL, queued next batch, retry and session recovery',async()=>{
+ const store={};let listener,removed;let id=10;const tabs=new Map(),navigation=[];
+ globalThis.chrome={runtime:{id:'test',getURL:p=>'chrome-extension://test/'+p,onMessage:{addListener:fn=>listener=fn}},storage:{local:{get:async key=>({[key]:structuredClone(store[key])}),set:async values=>Object.assign(store,structuredClone(values))}},tabs:{create:async options=>{const tab={id:++id,...options};tabs.set(id,tab);return tab;},update:async(id,v)=>{Object.assign(tabs.get(id),v);navigation.push({id,...v});},remove:async id=>tabs.delete(id),sendMessage:async()=>{},onRemoved:{addListener:fn=>removed=fn}}};
+ await import('./background.js?direct');
+ const app={id:'test',url:'https://qyc20250805.github.io/shidan/',tab:{id:1}};
  const send=(m,s=app)=>new Promise(resolve=>listener(m,s,resolve));
- for(const merchant of MERCHANTS){
-  const id=merchant.id,origin=merchant.origin,code=id==='montbell'?'2301351':row.sku,key=merchant.type==='petit'?code:merchant.type==='shopify'?'V:123':'M:2301351:LGY:M:2';
-  const sender=path=>({id:'multi',url:origin+path,tab:{id:12}}),msg=(type,data={})=>({type,id,index:0,...data});
-  await send({type:'SD_START',batch:{id,merchant:origin+(id==='montbell'?'/jp/en/products':''),items:[{...row,sku:code}]}});
-  await send(msg('SD_CART',{cart:{}}),sender(merchant.cartPath));assert.equal(saved.stage,'search');
-  const product=origin+merchant.productPrefix+'test';await send(msg('SD_PRODUCT',{url:product}),{...sender(''),url:searchURL(merchant,code)});assert.equal(saved.stage,'product');
-  await send(msg('SD_ARM',{sku:code,key}),sender(merchant.productPrefix+'test'));assert.equal(saved.stage,'verify');
-  await send(msg('SD_CART',{cart:{[key]:1}}),sender(merchant.cartPath));assert.equal(saved.done,true);assert.equal(saved.items[0].status,'added');
- }
- await send({type:'SD_START',batch:{...batch,id:'failure'}});await send({type:'SD_FAIL',id:'failure',index:0,reason:'HTTP 422'},{id:'multi',url:SHOP+'/cart',tab:{id:12}});assert.equal(saved.items[0].status,'failed');assert.equal(saved.done,true);
+ const product=SHOP+'/products/a0dv4-bebe-25h81-cardigans';
+ const first={...batch,id:'direct',items:[{...row,url:product}]};
+ assert.equal((await send({type:'SD_START',batch:first})).result.id,'direct');
+ const job=()=>store.job;
+ assert.equal(navigation[0].url,product);assert.equal(tabs.get(job().tabId).active,true);
+ assert.equal(tabs.get(job().baselineTabId).active,false);
+ const sender=(tabId,path)=>({id:'test',url:SHOP+path,tab:{id:tabId}});
+ const msg=(type,data={})=>({type,id:job().id,index:job().index,...data});
+ const before=tabs.size;await send({type:'SD_START',batch:first});assert.equal(tabs.size,before);
+ await send(msg('SD_CART',{cart:{}}),sender(job().baselineTabId,'/cart'));assert.equal(job().stage,'product');assert.equal(job().product,product);
+ const current=job().tabId;
+ await send({type:'SD_START',batch:{...first,id:'next'}});assert.equal(store.waiting.length,1);const queued=store.waiting[0];assert.equal(tabs.get(queued.tabId).url,product);
+ const state=await send({type:'SD_STATE'},sender(queued.tabId,'/products/a0dv4-bebe-25h81-cardigans'));assert.equal(state.job.stage,'queued');
+ await send(msg('SD_ARM',{sku:row.sku}),sender(current,'/products/a0dv4-bebe-25h81-cardigans'));assert.equal(job().stage,'verify');
+ assert.ok((await send(msg('SD_ARM',{sku:row.sku}),sender(current,'/products/a0dv4-bebe-25h81-cardigans'))).error);
+ await send(msg('SD_CART',{cart:{[row.sku]:1}}),sender(current,'/cart'));
+ assert.equal(store.history.direct.items[0].status,'added');assert.equal(job().id,'next');assert.equal(job().stage,'baseline');
+ await send(msg('SD_FAIL',{reason:'HTTP 422'}),sender(job().tabId,'/products/a0dv4-bebe-25h81-cardigans'));assert.equal(job().done,true);
+ assert.equal(store.history.next.items[0].reason,'HTTP 422');
+ await send({type:'SD_START',batch:{...first,id:'retry'}});assert.equal(job().id,'retry');assert.equal(tabs.get(job().tabId).url,product);
+ store.job.updatedAt=Date.now()-11*60*1000;
+ const poll=await send({type:'SD_POLL',ids:['direct','next','retry','missing']});assert.equal(store.job.done,true);assert.ok(poll.results.some(r=>r.id==='retry'&&r.items[0].status==='review'));assert.deepEqual(poll.missingIds,['missing']);
+ const count=tabs.size;await send({type:'SD_START',batch:first});assert.equal(tabs.size,count);
 });

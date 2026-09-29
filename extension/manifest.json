@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "拾单 · 四商家加购助手",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "按货号查找、严格核对尺码，人工确认图片后加入购物车；不下单、不支付。",
   "permissions": [
     "storage"

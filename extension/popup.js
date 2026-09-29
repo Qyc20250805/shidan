@@ -4,4 +4,4 @@ async function refresh(){try{const result=await chrome.runtime.sendMessage({type
 for(const r of current?.items||[]){const item=document.createElement('article');item.textContent=`${r.sku} · ${r.size}码 · 已加 ${r.added}/${r.quantity} 件 · ${{pending:'处理中',added:'已加购',review:'需人工核对',failed:'加购失败'}[r.status]} ${r.reason||''}`;list.append(item);}}catch(error){status.textContent=error.message;}}
 document.querySelector('#refresh').onclick=refresh;
 document.querySelector('#open').onclick=async()=>{try{await chrome.tabs.update(current.tabId,{active:true});}catch{status.textContent='商家标签页已关闭，请回到拾单核对结果';}};
-document.querySelector('#stop').onclick=async()=>{await chrome.runtime.sendMessage({type:'SD_STOP'});await refresh();};refresh();
+document.querySelector('#stop').onclick=async()=>{try{const r=await chrome.runtime.sendMessage({type:'SD_STOP'});if(r.error)throw Error(r.error);await refresh();}catch(e){status.textContent=e.message;}};refresh();

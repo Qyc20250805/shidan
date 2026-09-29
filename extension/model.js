@@ -28,5 +28,5 @@ export function verifyCart(before, after, expectedSku) {
 }
 export function view(job) {
   if (!job) return null;
-  return {id:job.id, done:job.done, items:job.items.map(r=>({id:r.id, status:r.status, added:r.added, reason:r.reason || ''}))};
+  return {id:job.id, done:job.done, phase:job.stage, items:job.items.map(r=>({id:r.id, status:r.status, added:r.added, reason:r.reason || ''}))};
 }

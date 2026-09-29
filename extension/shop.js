@@ -14,6 +14,8 @@
    job=(await send('SD_STATE')).job;if(!job)return;
    document.documentElement.append(host);const adapter=globalThis.ShidanAdapters[job.merchant?.type];if(!adapter)throw Error('无法识别商家规则');
    status(`第 ${job.index+1} 条：${job.item.sku} · ${job.item.size} · ${job.item.added}/${job.item.quantity} 件`);
+   if(job.stage==='queued'){status('商品页已打开；上一批结束后会继续核对本批。可以返回拾单继续选单。');return;}
+   if(job.stage==='baseline' && location.pathname!==job.merchant.cartPath){status('已打开订单商品页，正在读取购物车。可以返回拾单继续选单。');return;}
    if(location.pathname===job.merchant.cartPath&&['baseline','verify'].includes(job.stage)){
     await sleep(12000);const first=await adapter.cart();await sleep(1000);const second=await adapter.cart();
     if(JSON.stringify(first)!==JSON.stringify(second))throw Error('购物车正在变化，请人工核对');await send('SD_CART',{cart:second});return;
