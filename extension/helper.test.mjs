@@ -5,14 +5,16 @@ import {createRequire} from 'node:module';
 const {JSDOM}=createRequire(process.env.SHIDAN_TEST_PACKAGE || new URL('./package.json',import.meta.url))('jsdom');
 import {MERCHANTS,getMerchant,searchURL} from './merchants.js';
 import {validateBatch,verifyCart,SHOP} from './model.js';
-const row={id:'r1',sku:'A0DV401090',size:'95',color:'',image:'data:image/png;base64,YQ==',url:'',quantity:1};
+const row={id:'r1',sku:'A0DV401090',size:'95',color:'',image:'data:image/png;base64,YQ==',url:SHOP+'/products/test',quantity:1};
 const batch={id:'b1',merchant:SHOP,items:[row]};
 test('strict quantity limit, unique IDs, restricted image data and merchant',()=>{
  assert.equal(validateBatch(batch),true);
  assert.throws(()=>validateBatch({...batch,items:[{...row,quantity:21}]}));
  assert.throws(()=>validateBatch({...batch,items:[row,row]}));
  assert.throws(()=>validateBatch({...batch,merchant:'https://evil.test'}));
- assert.throws(()=>validateBatch({...batch,items:[{...row,image:'https://evil.test/x'}]}));
+ assert.ok(validateBatch({...batch,items:[{...row,image:''}]}));
+ assert.throws(()=>validateBatch({...batch,items:[{...row,image:'javascript:alert(1)'}]}));
+ assert.throws(()=>validateBatch({...batch,items:[{...row,url:''}]}));
 });
 test('cart confirmation requires exactly one intended SKU increment and no other changes',()=>{
  assert.ok(verifyCart({OLD:2},{OLD:2,A0DV401090:1},row.sku));
@@ -21,20 +23,20 @@ test('cart confirmation requires exactly one intended SKU increment and no other
 });
 const adapters=fs.readFileSync(new URL('./adapters.js',import.meta.url),'utf8');
 const script=fs.readFileSync(new URL('./shop.js',import.meta.url),'utf8');
-async function productFixture(code='A0DV401090'){
- const dom=new JSDOM(`<main><h1>商品</h1><h3>カラー ブルー</h3><img src="https://cdn.shopify.com/x.jpg"><input type="radio" value="36ヶ月 95cm"><div id="x-panel-description">商品番号： ${code}</div><button id="add">カートに入れる</button></main>`,{url:SHOP+'/products/test',runScripts:'outside-only'});
+async function productFixture(code='A0DV401090',image=row.image){
+ const dom=new JSDOM(`<main><h1>商品</h1><div class="product-heading_PriceContainer__T"><span class="product-heading_Price__A product-heading_CompareAtPrice__C">￥11,000</span><span class="product-heading_Price__A product-heading_DiscountPrice__D">￥8,800<span> (税込)</span></span></div><h3>カラー ブルー</h3><img src="https://cdn.shopify.com/x.jpg"><input type="radio" value="36ヶ月 95cm"><div id="x-panel-description">商品番号： ${code}</div><button id="add">カートに入れる</button></main>`,{url:SHOP+'/products/test',runScripts:'outside-only'});
  const w=dom.window;const messages=[];let panel,clicks=0;
  const attach=w.HTMLElement.prototype.attachShadow;w.HTMLElement.prototype.attachShadow=function(o){panel=attach.call(this,o);return panel};
  w.HTMLElement.prototype.getClientRects=()=>[{}];
  Object.defineProperty(w.HTMLImageElement.prototype,'complete',{get:()=>true});Object.defineProperty(w.HTMLImageElement.prototype,'naturalWidth',{get:()=>100});
  w.setTimeout=fn=>setTimeout(fn,0);
- w.chrome={runtime:{sendMessage:async m=>{messages.push(m);if(m.type==='SD_STATE')return{job:{id:'b1',index:0,stage:'product',merchant:MERCHANTS[0],item:{...row,added:0},product:SHOP+'/products/test'}};return m.type==='SD_ARM'?{armed:true}:{ok:true}}}};
+ w.chrome={runtime:{sendMessage:async m=>{messages.push(m);if(m.type==='SD_STATE')return{job:{id:'b1',index:0,stage:'product',merchant:MERCHANTS[0],item:{...row,image,added:0},product:SHOP+'/products/test'}};return m.type==='SD_ARM'?{armed:true}:{ok:true}}}};
  w.document.querySelector('#add').onclick=()=>clicks++;
  w.eval(adapters);w.eval(script);await new Promise(r=>setTimeout(r,120));
  return{w,messages,get panel(){return panel},get clicks(){return clicks}};
 }
 test('product adapter requires explicit image confirmation before one cart click',async()=>{
- const f=await productFixture();assert.equal(f.clicks,0);const check=f.panel.querySelector('input');assert.ok(check);check.checked=true;check.dispatchEvent(new f.w.Event('change'));
+ const f=await productFixture();assert.equal(f.clicks,0);const check=f.panel.querySelector('input');assert.ok(check);check.checked=true;check.dispatchEvent(new f.w.Event('change'));await new Promise(r=>setTimeout(r,20));
  const confirm=[...f.panel.querySelectorAll('button')].find(b=>b.textContent.includes('确认一致'));
  confirm.click();confirm.click();await new Promise(r=>setTimeout(r,30));assert.equal(f.clicks,1);assert.equal(f.messages.filter(m=>m.type==='SD_ARM').length,1);assert.ok(f.messages.some(m=>m.type==='SD_GO_CART'));
  f.w.close();
@@ -43,7 +45,7 @@ test('mismatched SKU stops without cart click',async()=>{const f=await productFi
 test('image mismatch stops without cart click',async()=>{const f=await productFixture();[...f.panel.querySelectorAll('button')].find(b=>b.textContent.startsWith('不一致')).click();await new Promise(r=>setTimeout(r,10));assert.equal(f.clicks,0);assert.ok(f.messages.some(m=>m.type==='SD_REVIEW'));f.w.close();});
 
 test('four merchant detection, canonical search and total pieces',()=>{
- for(const m of MERCHANTS){assert.equal(getMerchant(m.origin+(m.id==='montbell'?'/jp/en/products':''))?.id,m.id);assert.ok(searchURL(m,'A B').includes('A%20B'));assert.ok(validateBatch({...batch,merchant:m.origin+(m.id==='montbell'?'/jp/en/products':'')}));}
+ for(const m of MERCHANTS){assert.equal(getMerchant(m.origin+(m.id==='montbell'?'/jp/en/products':''))?.id,m.id);assert.ok(searchURL(m,'A B').includes('A%20B'));assert.ok(validateBatch({...batch,merchant:m.origin+(m.id==='montbell'?'/jp/en/products':''),items:[{...row,url:m.origin+m.productPrefix+'test'}]}));}
  assert.equal(getMerchant('https://www.panpantutu.com.evil.test'),null);
  assert.equal(getMerchant('https://user:pass@www.panpantutu.com'),null);
  assert.equal(getMerchant('https://www.montbell.com/us/en/products'),null);
@@ -111,7 +113,11 @@ test('direct real product URL, queued next batch, retry and session recovery',as
  const current=job().tabId;
  await send({type:'SD_START',batch:{...first,id:'next'}});assert.equal(store.waiting.length,1);const queued=store.waiting[0];assert.equal(tabs.get(queued.tabId).url,product);
  const state=await send({type:'SD_STATE'},sender(queued.tabId,'/products/a0dv4-bebe-25h81-cardigans'));assert.equal(state.job.stage,'queued');
- await send(msg('SD_ARM',{sku:row.sku}),sender(current,'/products/a0dv4-bebe-25h81-cardigans'));assert.equal(job().stage,'verify');
+ const q={price:8800,originalPrice:11000,currency:'JPY',readAt:new Date().toISOString(),url:product};
+ assert.ok((await send(msg('SD_ARM',{sku:row.sku}),sender(current,'/products/a0dv4-bebe-25h81-cardigans'))).error);
+ await send(msg('SD_IMAGE',{image:'https://cdn.shopify.com/x.jpg'}),sender(current,'/products/a0dv4-bebe-25h81-cardigans'));
+ await send(msg('SD_QUOTE',{quote:q}),sender(current,'/products/a0dv4-bebe-25h81-cardigans'));
+ await send(msg('SD_ARM',{sku:row.sku,quote:q}),sender(current,'/products/a0dv4-bebe-25h81-cardigans'));assert.equal(job().stage,'verify');
  assert.ok((await send(msg('SD_ARM',{sku:row.sku}),sender(current,'/products/a0dv4-bebe-25h81-cardigans'))).error);
  await send(msg('SD_CART',{cart:{[row.sku]:1}}),sender(current,'/cart'));
  assert.equal(store.history.direct.items[0].status,'added');assert.equal(job().id,'next');assert.equal(job().stage,'baseline');
@@ -121,4 +127,24 @@ test('direct real product URL, queued next batch, retry and session recovery',as
  store.job.updatedAt=Date.now()-11*60*1000;
  const poll=await send({type:'SD_POLL',ids:['direct','next','retry','missing']});assert.equal(store.job.done,true);assert.ok(poll.results.some(r=>r.id==='retry'&&r.items[0].status==='review'));assert.deepEqual(poll.missingIds,['missing']);
  const count=tabs.size;await send({type:'SD_START',batch:first});assert.equal(tabs.size,count);
+});
+
+test('PB webpage quote is current selling price, original is reference only; no client image required',async()=>{
+ const f=await productFixture();const choices=await f.w.ShidanAdapters.petit.choices({...row,image:''});
+ const q=await choices[0].readPrice();assert.equal(q.price,8800);assert.equal(q.originalPrice,11000);assert.equal(q.currency,'JPY');assert.ok(q.readAt);assert.equal(f.clicks,0);
+ f.w.document.querySelector('[class*="DiscountPrice__"]').textContent='￥8,800~';await assert.rejects(choices[0].readPrice(),/区间/);assert.equal(f.clicks,0);f.w.close();
+});
+test('Shopify quote uses selected variant price and presentment currency; unknown currency stops',async()=>{
+ const product={...panProduct,variants:panProduct.variants.map(v=>({...v,price:250000,compare_at_price:300000}))};
+ let currency='JPY';const w=fixture(MERCHANTS[1],'<main></main>','/products/171777',async url=>({ok:true,json:async()=>url.endsWith('/cart.js')?{currency}:product}));
+ const [choice]=await w.ShidanAdapters.shopify.choices({...row,sku:'171777',size:'80'});const q=await choice.readPrice();assert.equal(q.price,2500);assert.equal(q.originalPrice,3000);assert.equal(q.currency,'JPY');currency=undefined;await assert.rejects(choice.readPrice(),/币种/);w.close();
+});
+test('Montbell quote is scoped to chosen shipping region; ambiguous price does not guess',async()=>{
+ const html=montHTML.replace('From USA','From USA<span class="display-price">$370.00</span>');
+ const w=fixture(MERCHANTS[3],html,'/jp/en/products/detail/2301351');const [choice]=await w.ShidanAdapters.montbell.choices({...row,sku:'2301351',size:'M',color:'LGY'});await choice.activate();const q=await choice.readPrice();assert.equal(q.price,370);assert.equal(q.currency,'USD');assert.equal(q.originalPrice,null);w.document.querySelector('.display-price').textContent='370';await assert.rejects(choice.readPrice(),/币种/);w.close();
+});
+
+test('no customer image: automatically observes main image, quotes only after manual check, never auto-adds',async()=>{
+ const f=await productFixture('A0DV401090','');assert.equal(f.panel.querySelectorAll('img').length,1);assert.ok(f.messages.some(m=>m.type==='SD_IMAGE'));assert.ok(!f.messages.some(m=>m.type==='SD_QUOTE'));assert.equal(f.clicks,0);
+ const check=f.panel.querySelector('input');check.checked=true;check.dispatchEvent(new f.w.Event('change'));await new Promise(r=>setTimeout(r,30));assert.ok(f.messages.some(m=>m.type==='SD_QUOTE'&&m.quote.price===8800&&m.quote.currency==='JPY'));assert.equal(f.clicks,0);f.w.close();
 });
