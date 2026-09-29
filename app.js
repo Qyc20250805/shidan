@@ -1,5 +1,5 @@
 import {getMerchant} from './merchants.js';
-import { parseChain } from "./chain.js";
+import { parseChain } from "./chain.js?pricing=1";
 let syncCodeModule;
 function loadSyncCode() {
   return syncCodeModule ||= import("./sync-code.js?v=1").catch(error => { syncCodeModule = null; throw error; });
@@ -18,11 +18,14 @@ import {
   amounts,
   batchCheck,
   validateRow,
+  detailError,
+  safeProductImage,
+  validQuote,
   importRows,
   csvCell,
   productUrl,
   round,
-} from "./core.js?cart-retry=1";
+} from "./core.js?pricing=1";
 const $ = (s) => document.querySelector(s),
   $$ = (s) => [...document.querySelectorAll(s)];
 const h = (tag, attrs = {}, ...children) => {
@@ -217,10 +220,10 @@ function selectItems(rows, checked) {
   if (limited) toast('最多选择 20 件，超出数量的明细未勾选');
 }
 function imageNode(row) {
-  if (row.image)
+  if (row.webImage || row.image)
     return h("img", {
       class: "thumb",
-      src: row.image,
+      src: row.webImage || row.image,
       alt: row.name || "商品参考图",
       loading: "lazy",
       referrerpolicy: "no-referrer",
@@ -237,12 +240,7 @@ function imageNode(row) {
     "＋",
   );
 }
-function safeImage(v) {
-  return (
-    typeof v === "string" &&
-    (/^(https:\/\/)/.test(v) || /^data:image\/(png|jpeg|webp);base64,/.test(v))
-  );
-}
+const safeImage = safeProductImage;
 function field(label, id, value, type = "text", attrs = {}) {
   return h(
     "label",
@@ -297,7 +295,7 @@ function shell() {
           "div",
           {},
           h("h1", {}, "把每一件，核对清楚"),
-          h("p", {}, "整理明细 · 手动选单 · 核对后购买"),
+          h("p", {}, "粘贴接龙 · 勾选明细 · 核对后加购"),
         ),
         h(
           "span",
@@ -650,7 +648,7 @@ function renderRowsOnly() {
         {},
         state.rows.length
           ? "换个关键词或清除筛选再试试。"
-          : "可以新增商品，也可以直接粘贴 Excel 表格。",
+          : "点击“粘贴接龙”，按固定格式一键生成明细。",
       ),
       state.rows.length
         ? btn("清除筛选", () => {
@@ -718,8 +716,10 @@ function renderRowsOnly() {
   );
 }
 function inline(r, key, label, cls = "", type = "text") {
+  if (["price", "originalPrice", "currency"].includes(key)) return h("input", {value:r[key] ?? (key==="currency"?"JPY":""),readonly:"",class:cls,"aria-label":`${r.seq} ${label}`,title:"由加购助手核对后回写，只读"});
   const a = amounts(r, state.settings);
-  let value = ["discount", "rate"].includes(key)
+  if(['discount','rate','shipping'].includes(key))return h('div',{},h('input',{value:a[key],readonly:'',class:cls,'aria-label':`${r.seq} ${label}`,title:'请在编辑明细的高级计价中设置'}),h('small',{class:'muted'},r[key]===''||r[key]==null?'继承批次设置':'单条覆盖'));
+  let value = ["discount", "rate", "shipping"].includes(key)
     ? a[key]
     : key === "currency"
       ? r.currency || "JPY"
@@ -731,7 +731,7 @@ function inline(r, key, label, cls = "", type = "text") {
     "aria-label": `${r.seq} ${label}`,
     "data-row-id": r.id,
     "data-field": key,
-    title: ["discount", "rate"].includes(key)
+    title: ["discount", "rate", "shipping"].includes(key)
       ? r[key] === ""
         ? "跟随顶部设置；填写后单独设置"
         : "单独设置；清空可恢复跟随"
@@ -748,7 +748,7 @@ function inline(r, key, label, cls = "", type = "text") {
         "discount",
         "rate",
       ].includes(key)
-        ? v === "" && ["discount", "rate", "originalPrice"].includes(key)
+        ? v === "" && ["discount", "rate", "shipping", "originalPrice"].includes(key)
           ? ""
           : Number(v)
         : key === "currency"
@@ -976,7 +976,7 @@ function rowNode(r) {
         "div",
         { class: "product-cell" },
         btn(imageNode(r), () => editRow(r), "image-button", {
-          "aria-label": `编辑第 ${r.seq} 行图片`,
+          "aria-label": `编辑第 ${r.seq} 行明细`,
         }),
         h(
           "div",
@@ -1028,6 +1028,9 @@ function rowNode(r) {
     ),
   );
 }
+function mobileCartDevice() {
+  return /Android|iPhone|iPad|iPod/i.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+}
 function renderSide() {
   const rows = selectRows(),
     count = rows.reduce((n, r) => n + Number(r.quantity), 0),
@@ -1042,7 +1045,7 @@ function renderSide() {
     }, new Map()),
     error = document.querySelector(".settings [aria-invalid=true]")
       ? "请修正顶部折扣和汇率"
-      : batchCheck(rows, state.settings);
+      : mobileCartDevice() ? '加购仅支持电脑 Chrome；手机可录入并同步明细' : batchCheck(rows, state.settings);
   $("#selection").replaceChildren(
     h("h2", {}, "本次选单"),
     h(
@@ -1106,7 +1109,7 @@ function renderSide() {
     h(
       "p",
       { class: "note" },
-      "助手按货号查找，逐件人工确认图片后加购。不一致会标记“需人工核对”，不会下单或付款。",
+      "助手打开明细商品链接，读取网页主图，逐件人工核对后加购。不一致会标记“需人工核对”，不会下单或付款。",
     ),
   );
 }
@@ -1160,163 +1163,71 @@ async function imageData(file) {
 }
 function editRow(existing) {
   if (!existing && !checkMerchant()) return;
-  if (!existing && state.rows.length >= 2000)
-    return toast("最多2,000条明细，请先导出备份再分批处理");
-  const r =
-    existing ||
-    newRow({
-      seq: Math.max(0, ...state.rows.map((r) => Number(r.seq) || 0)) + 1,
-    });
-  let photo = r.image;
-  const locked = r.status !== "draft";
-  const fields = !existing ? [
-    ["customer", "客户昵称", "text"],
-    ["sku", "货号", "text"],
-    ["size", "目标尺码（cm）", "text"],
-    ["url", "商品链接（可选）", "url"],
-  ] : [
-    ["customer", "客户昵称", "text"],
-    ["sku", "货号", "text"],
-    ["name", "商品名称", "text"],
-    ["size", "目标尺码（cm）", "text"],
-    ["color", "颜色", "text"],
-    ["quantity", "数量", "number"],
-    ["originalPrice", "网页原价（仅记录）", "number"],
-    ["price", "网页当前售价", "number"],
-    ["currency", "币种（JPY 为日元）", "text"],
-    ["shipping", "本行运费（人民币）", "number"],
-    ["discount", "核算折扣（留空跟随顶部）", "number"],
-    ["rate", "单独汇率（留空跟随顶部）", "number"],
-    ["url", "商品链接（可选）", "url"],
+  if (!existing && state.rows.length >= 2000) return toast("最多2,000条明细，请先导出备份再分批处理");
+  const r = existing || newRow({seq: Math.max(0, ...state.rows.map(r => Number(r.seq) || 0)) + 1});
+  const epoch = authEpoch;
+  let saving = false;
+  const fields = [
+    ['customer','客户昵称（必填）','text'], ['sku','货号（必填）','text'],
+    ['size','目标尺码（cm，必填）','text'], ['quantity','数量（必填）','number'],
+    ['url','商品链接（必填）','url'], ['name','商品名称（选填）','text'], ['color','颜色（选填）','text'],
   ];
-  const form = h(
-    "form",
-    { novalidate: "", onSubmit: (e) => e.preventDefault() },
-    h(
-      "div",
-      { class: "form-grid" },
-      ...fields.map(([key, label, type]) =>
-        field(
-          label,
-          "edit-" + key,
-          key === "currency" ? r.currency || "JPY" : (r[key] ?? ""),
-          type,
-          {
-            disabled: locked,
-            "data-key": key,
-            step: "any",
-          },
-        ),
-      ),
-      h(
-        "label",
-        { for: "image-file", class: "wide" },
-        "商品图片 · JPG / PNG / WebP，最多 5 MB",
-        h("input", {
-          id: "image-file",
-          type: "file",
-          accept: "image/jpeg,image/png,image/webp",
-          disabled: locked,
-          onChange: async (e) => {
-            try {
-              photo = await imageData(e.target.files[0]);
-              $("#photo-box").replaceChildren(
-                h("img", { src: photo, class: "thumb", alt: "商品图片预览" }),
-              );
-            } catch (err) {
-              $("#form-error").textContent = err.message;
-            }
-          },
-        }),
-        h("div", { id: "photo-box" }, r.image ? imageNode(r) : null),
-      ),
-    ),
-    h(
-      "p",
-      { class: "help" },
-      !existing
-        ? "数量默认 1，状态默认待处理；核算折扣和汇率沿用顶部设置。原价、售价、运费可在新增后编辑，应收按现有规则计算。"
-        :"计价基础固定等于网页当前售价；原价仅记录。应收人民币 = 网页当前售价 × 核算折扣 × 数量 × 汇率 + 行运费。运费整行只加一次。汇率为本行币种兑人民币。",
-    ),
-    r.helper ? h("p", {class:"notice"}, `${helperStatus(r)} · 已加 ${r.helper.added}/${r.quantity} 件。${r.helper.reason || ""}`) : null,
-    locked
-      ? h(
-          "p",
-          { class: "notice" },
-          "此明细已交接。若要修改，请先在批次记录中撤回，并核对商家购物车。",
-        )
-      : null,
-    errorBox(),
-  );
-  const actions = [btn("关闭", () => $("#dialog").close())];
-  if (existing)
-    actions.unshift(btn("删除该条明细", () => confirmDeleteRow(r), "ghost danger"));
-  if (!locked)
-    actions.push(
-      btn(
-        "保存明细",
-        () => {
-          if (conflict) return toast("请先刷新，避免覆盖另一窗口");
-          if (!existing && !checkMerchant()) return;
-          const v = { ...r, image: photo };
-          fields.forEach(([key, , type]) => {
-            const val = $("#edit-" + key).value.trim();
-            v[key] =
-              type === "number"
-                ? val === "" &&
-                  ["discount", "rate", "originalPrice"].includes(key)
-                  ? ""
-                  : Number(val)
-                : key === "currency"
-                  ? val.toUpperCase()
-                  : val;
-          });
-          fields.forEach(([key]) => {
-            const input = $("#edit-" + key);
-            input.removeAttribute("aria-invalid");
-            input.removeAttribute("aria-describedby");
-          });
-          const err = validateRow(v);
-          if (err) {
-            $("#form-error").textContent = err;
-            const key = !v.customer
-              ? "customer"
-              : !v.sku && !v.url
-                ? "sku"
-                : !v.size
-                  ? "size"
-                  : /数量/.test(err)
-                    ? "quantity"
-                    : /折扣/.test(err)
-                      ? "discount"
-                      : /汇率/.test(err)
-                        ? "rate"
-                        : /链接/.test(err)
-                          ? "url"
-                          : /币种/.test(err)
-                            ? "currency"
-                            : /原价/.test(err)
-                              ? "originalPrice"
-                              : "price";
-            const input = $("#edit-" + key);
-            input.setAttribute("aria-invalid", "true");
-            input.setAttribute("aria-describedby", "form-error");
-            input.focus();
-            return;
-          }
-          if (existing) Object.assign(existing, v);
-          else state.rows.push(v);
-          if (selected.has(v.id) && selectRows().reduce((n,row) => n + Number(row.quantity), 0) > 20) selected.delete(v.id);
-          persist();
-          $("#dialog").close();
-          renderContent();
-          renderSide();
-          toast("明细已保存");
-        },
-        "primary",
-      ),
-    );
-  modal(existing ? `编辑明细 · ${r.seq}` : "新增明细", form, actions);
+  const error = errorBox();
+  const advanced = h('details',{class:'advanced-pricing'},h('summary',{},'高级计价 · '+(['discount','rate','shipping'].some(k=>r[k]!==''&&r[k]!=null)?'单条覆盖':'继承批次设置')));
+  for(const [key,label] of [['discount','核算折扣'],['rate','汇率（本币 → 人民币）'],['shipping','本行运费（人民币）']]){
+    const overridden = r[key] !== '' && r[key] != null;
+    const input=field(label,'edit-'+key,overridden?r[key]:'','number',{step:'any',disabled:!overridden});
+    const control=input.querySelector('input');
+    const mode=h('select',{id:'edit-'+key+'-mode','aria-label':label+'计价方式',onChange:e=>{
+      control.disabled=e.target.value==='inherit';
+      advanced.querySelector('summary').textContent='高级计价 · '+([...advanced.querySelectorAll('select')].some(n=>n.value==='override')?'单条覆盖':'继承批次设置');
+      if(!control.disabled && control.value==='')control.value=amounts(r,state.settings)[key];
+    }},h('option',{value:'inherit'},'继承批次设置'),h('option',{value:'override'},'单条覆盖'));
+    mode.value=overridden?'override':'inherit';
+    advanced.append(h('div',{class:'pricing-override'},h('label',{for:mode.id},label+'设置',mode),input));
+  }
+  advanced.append(h('p',{class:'help'},'留在“继承批次设置”时跟随顶部折扣、汇率；默认行运费为 '+money(state.settings.shipping || 0)+' 元。单条覆盖仅影响本条，运费整行只加一次。'));
+  const readonlyPrice = h('div',{class:'form-grid price-readonly','aria-label':'网页价格（只读）'},
+    ...[['originalPrice','网页原价'],['price','网页当前售价'],['currency','币种']].map(([key,label])=>field(label,'read-'+key,
+      key==='currency' ? (r.currency || 'JPY') : (r[key] === '' || r[key] == null ? '未读取' : r[key]),'text',{readonly:''})),
+    h('p',{class:'help wide'},r.priceReadAt ? '价格读取时间：'+new Date(r.priceReadAt).toLocaleString('zh-CN') : '尚未由加购助手核对回写；已有价格保留。Petit Bateau 默认币种为 JPY。'));
+  const form=h('form',{novalidate:'',onSubmit:e=>e.preventDefault()},
+    h('div',{class:'form-grid'},...fields.map(([key,label,type])=>field(label,'edit-'+key,r[key] ?? '',type,{
+      'data-key':key, ...(!['name','color'].includes(key)?{'aria-required':'true'}:{}),
+      ...(key==='quantity'?{min:1,max:20,step:1}:{}),
+    }))),
+    h('div',{class:'readonly-photo'},h('strong',{},'网页主图（只读）'),r.webImage || r.image ? imageNode(r):h('p',{class:'help'},'打开商品链接后由助手自动读取主图，客户无需提供图片。')),
+    h('p',{class:'help'},'通过商品链接打开对应商品页，自动读取网页主图；核对货号、目标尺码和款式，无法确认时停止并标记“需人工核对”。'),
+    readonlyPrice,
+    h('p',{class:'help'},'应收人民币 = 网页当前售价 × 核算折扣 × 数量 × 汇率 + 行运费。网站原价不参与计算；不会再叠加网站促销折扣。'),
+    advanced,
+    r.helper ? h('p',{class:'notice'},`${helperStatus(r)} · 已加 ${r.helper.added}/${r.quantity} 件。${r.helper.reason || ''}`) : null,error);
+  const cancel=btn('取消',()=>$('#dialog').close());
+  const saveButton=btn(existing?'保存修改':'保存明细',async()=>{
+    if(saving)return;
+    if(conflict||authLoading||epoch!==authEpoch||!db||(workspaceSync&&!workspaceSync.ready))return toast('请等待同步完成或刷新后再保存');
+    if(!existing&&!checkMerchant())return;
+    const v={...r};
+    for(const [key,,type] of fields){const raw=$('#edit-'+key).value.trim();v[key]=type==='number'?Number(raw):raw;}
+    for(const key of ['discount','rate','shipping']){
+      const isOverride=$('#edit-'+key+'-mode').value==='override';
+      const raw=$('#edit-'+key).value.trim();v[key]=isOverride ? (raw===''?NaN:Number(raw)) : '';
+    }
+    for(const input of form.querySelectorAll('[aria-invalid]')){input.removeAttribute('aria-invalid');input.removeAttribute('aria-describedby');}
+    const issue=detailError(v);
+    if(issue){error.textContent=issue.message;const input=$('#edit-'+issue.key);if(input){input.closest('details')?.setAttribute('open','');input.setAttribute('aria-invalid','true');input.setAttribute('aria-describedby','form-error');input.focus();}return;}
+    const before=structuredClone(r);
+    if(existing)Object.assign(existing,v);else state.rows.push(v);
+    saving=true;saveButton.disabled=cancel.disabled=true;saveButton.setAttribute('aria-busy','true');
+    let failure;persist(e=>{failure=e});await writeQueue;
+    if(epoch!==authEpoch)return;
+    if(failure){if(existing){for(const key of [...fields.map(f=>f[0]),'discount','rate','shipping'])existing[key]=before[key];}else state.rows=state.rows.filter(row=>row!==v);saving=false;saveButton.disabled=cancel.disabled=false;saveButton.removeAttribute('aria-busy');error.textContent='保存失败，请重试；输入已保留。';return;}
+    if(selected.has(v.id)&&selectRows().reduce((n,row)=>n+Number(row.quantity),0)>20)selected.delete(v.id);
+    $('#dialog').close();renderContent();renderSide();toast(existing?'已保存修改':'明细已保存');
+  },'primary');
+  const actions=[cancel,saveButton];
+  if(existing)actions.push(btn('删除该条明细',()=>{if(!saving)confirmDeleteRow(r)},'ghost danger'));
+  modal(existing?`编辑明细 · ${r.seq}`:'新增明细',form,actions);
 }
 function confirmDeleteRow(row) {
   if (conflict || authLoading || (workspaceSync && !workspaceSync.ready))
@@ -1589,7 +1500,7 @@ function exportCSV() {
       r.name,
       r.size,
       r.quantity,
-      r.shipping,
+      a.shipping,
       r.price,
       a.discount,
       a.rate,
@@ -1617,6 +1528,7 @@ function helperRequest(type, data = {}, timeout = 8000) {
   });
 }
 function helperStatus(r) {
+  if (detailError(r)) return '信息不完整';
   if (r.helper) return {pending:'待人工核对',added:'已处理',review:'需人工核对',failed:'加购失败'}[r.helper.status] || '可重新加购';
   return {draft:'待处理',handoff:'已交接',ordered:'已下单'}[r.status] || '待处理';
 }
@@ -1632,6 +1544,20 @@ function applyHelperResult(result) {
     if (!original || !['pending','added','review','failed'].includes(update.status) || !Number.isSafeInteger(update.added) || update.added < 0 || update.added > original.quantity) continue;
     const reason = update.reason || (update.status==='pending' ? (result.phase==='queued'?'商品页已打开，等待上一批完成；可继续选单':'请在商品页核对图片、颜色和尺码；可继续选单') : '');
     const next = {status:update.status,added:update.added,reason:String(reason).slice(0,180)};
+    const identityMatches=row && ['sku','size','color','url'].every(key=>(row[key] || '')===(original[key] || ''));
+    if(safeProductImage(update.webImage) && update.webImage.startsWith('https://')) {
+      if(original.webImage!==update.webImage){original.webImage=update.webImage;changed=true;}
+      if(identityMatches && row.webImage!==update.webImage){row.webImage=update.webImage;changed=true;}
+    }
+    if(validQuote(update.quote)) {
+      const quote=update.quote;
+      if(JSON.stringify(original.priceQuote)!==JSON.stringify(quote)){original.priceQuote={...quote};changed=true;}
+      const sameIdentity=identityMatches;
+      if(sameIdentity && (!row.priceReadAt || Date.parse(quote.readAt)>Date.parse(row.priceReadAt))) {
+        row.price=quote.price;row.originalPrice=quote.originalPrice ?? '';row.currency=quote.currency;row.priceReadAt=quote.readAt;row.priceSourceUrl=quote.url;changed=true;
+      }
+    }
+
     if (JSON.stringify(original.helper)!==JSON.stringify(next)) {original.helper={...next};changed=true;}
     if (row && JSON.stringify(row.helper)!==JSON.stringify(next)) {row.helper=next;changed=true;}
   }
@@ -1670,13 +1596,14 @@ function installHelper() {
   modal('安装 四商家加购助手', h('div', {},
     h('p', {}, '请使用电脑 Chrome。下载并解压安装包，文件夹第一层应包含 manifest.json。'),
     h('p', {}, '打开 chrome://extensions，开启“开发者模式”，点击“加载已解压的扩展程序”，选择解压文件夹。安装或更新后刷新拾单及商家页面。'),
-    h('a', {href:'./shidan-helper.zip?v=0.4.0',download:'shidan-helper.zip',class:'primary'}, '下载 Chrome 扩展安装包'),
+    h('a', {href:'./shidan-helper.zip?v=0.4.0-pricing1',download:'shidan-helper.zip',class:'primary'}, '下载 Chrome 扩展安装包'),
     h('p', {class:'help'}, '已有旧版请移除旧版再加载此版本，避免两个助手同时工作。每件必须人工确认图片、颜色和尺码；仅加购物车，不提交订单、不付款。')
   ), [btn('关闭', () => $('#dialog').close())]);
 }
 let helperStarting = false;
 async function startHelper() {
   if (helperStarting || conflict) return;
+  if (mobileCartDevice()) return toast('请在电脑 Chrome 中使用加购助手');
   const rows = selectRows();
   const error = batchCheck(rows, state.settings);
   if (error) return toast(error);
@@ -1685,7 +1612,7 @@ async function startHelper() {
   helperStarting = true;
   try {
     const hello = await helperRequest('SD_HELLO');
-    if (hello.version !== '0.4.0') throw Error('请先安装加购助手 v0.4.0，再刷新拾单页面');
+    if (hello.version !== '0.4.0' || hello.pricing !== 'fixed-chain-v1') throw Error('请先更新本次 v0.4.0 加购助手安装包，再刷新拾单页面');
     if (epoch !== authEpoch || conflict) throw Error('工作台已切换，请重新选择商品');
     const current = selectRows();
     const problem = batchCheck(current, state.settings); if (problem) throw Error(problem);
@@ -1724,7 +1651,7 @@ function batchFile(batch) {
       name: r.name,
       size: r.size,
       color: r.color,
-      image: r.image,
+      image: safeProductImage(r.image) ? r.image : "",
       url: r.url || r.productUrl || r.imageUrl || "",
       quantity: r.quantity,
     })),
@@ -2520,139 +2447,28 @@ if (typeof window !== "undefined") {
 }
 
 function showChainImport() {
-  const area = h("textarea", {
-    id: "chain-text",
-    "aria-label": "接龙原文",
-    placeholder:
-      "货号：A0CV9030\n名称：藏青色背带裤\n1. 小林 95码 1件\n2. 小陈 104码 2件",
-  });
-  const hint = h(
-    "p",
-    { class: "help" },
-    "支持编号接龙；货号、名称、尺码可写在顶部作为公共信息。每条可覆盖。图片需导入后补充，未写数量默认 1 件。",
-  );
-  modal("粘贴接龙 · 先预览再导入", h("div", {}, hint, area, errorBox()), [
-    btn("取消", () => $("#dialog").close()),
-    btn(
-      "解析并预览",
-      () => {
-        try {
-          const result = parseChain(area.value);
-          showChainPreview(result, area.value);
-        } catch (e) {
-          $("#form-error").textContent = e.message;
-        }
-      },
-      "primary",
-    ),
-  ]);
-}
-function showChainPreview(result, original) {
-  const body = h(
-    "div",
-    {},
-    h(
-      "p",
-      {},
-      `识别到 ${result.rows.length} 条接龙。可直接修改；向右滚动可查看尺码与数量。`,
-    ),
-  );
-  const head = h(
-    "thead",
-    {},
-    h(
-      "tr",
-      {},
-      ["昵称", "货号", "商品名称", "尺码", "数量"].map((x) =>
-        h("th", { scope: "col" }, x),
-      ),
-    ),
-  );
-  const rows = result.rows.map(({ row }, index) => {
-    const cells = ["customer", "sku", "name", "size", "quantity"].map((key) => {
-      const input = h("input", {
-        "aria-label": `接龙第 ${index + 1} 条 ${{ customer: "昵称", sku: "货号", name: "商品名称", size: "尺码", quantity: "数量" }[key]}`,
-        value: row[key],
-        type: key === "quantity" ? "number" : "text",
-        onInput: (e) => {
-          row[key] =
-            key === "quantity" ? Number(e.target.value) : e.target.value;
-        },
-      });
-      return h("td", {}, input);
-    });
-    return h("tr", {}, cells);
-  });
-  const table = h("table", {}, head, h("tbody", {}, rows));
-  body.append(
-    h(
-      "div",
-      {
-        class: "table-wrap",
-        style: "min-height:0",
-        tabindex: "0",
-        "aria-label": "接龙预览，可横向滚动",
-      },
-      table,
-    ),
-  );
-  result.rows.forEach(({ row, issues }) => {
-    if (issues.length)
-      body.append(
-        h(
-          "p",
-          { class: "notice" },
-          `第 ${row.seq} 条：${issues.join("；")}。原文：${row.note}`,
-        ),
-      );
-  });
-  if (result.notes.length)
-    body.append(
-      h(
-        "p",
-        { class: "help" },
-        "未作为商品导入的说明：" + result.notes.join(" / "),
-      ),
-    );
-  body.append(
-    h(
-      "p",
-      { class: "help" },
-      "价格和运费暂为 0，图片尚未添加。缺少必填信息的行可先保存，补齐前不能推送。",
-    ),
-    errorBox(),
-  );
-  modal("核对接龙解析结果", body, [
-    btn("返回修改原文", () => {
-      showChainImport();
-      $("#chain-text").value = original;
-    }),
-    btn(
-      "确认导入明细",
-      () => {
-        if (state.rows.length + result.rows.length > 2000) {
-          $("#form-error").textContent = "超过 2,000 行，请分文件处理";
-          return;
-        }
-        for (const { row } of result.rows) {
-          if (row.url && !productUrl(row.url)) {
-            row.url = "";
-          }
-          state.rows.push(row);
-        }
-        persist();
-        $("#dialog").close();
-        tab = "details";
-        filter = "all";
-        query = "";
-        page = 1;
-        renderContent();
-        renderSide();
-        toast(`已导入 ${result.rows.length} 条接龙，请补齐标记的信息`);
-      },
-      "primary",
-    ),
-  ]);
+  const area=h('textarea',{id:'chain-text','aria-label':'接龙原文',placeholder:'昵称：小林\n货号：A0DV401090\n尺码：95\n商品链接：https://www.petit-bateau.co.jp/products/a0dv4-bebe-25h81-cardigans\n数量：1'});
+  let importing=false;
+  const error=errorBox();
+  const action=btn('一键导入',async()=>{
+    if(importing)return;
+    if(conflict||authLoading||!db||(workspaceSync&&!workspaceSync.ready)) {error.textContent='请等待同步完成或刷新后再导入';return;}
+    try {
+      const result=parseChain(area.value);
+      if(state.rows.length+result.rows.length>2000)throw Error('超过 2,000 行，请分批处理');
+      if(result.notes.length)throw Error('有未识别的文字，请按固定格式调整：'+result.notes.slice(0,3).join(' / '));
+      const max=Math.max(0,...state.rows.map(r=>Number(r.seq)||0));
+      const added=result.rows.map(({row},i)=>({...row,seq:max+i+1}));
+      importing=true;action.disabled=true;action.setAttribute('aria-busy','true');
+      state.rows.push(...added);let failure;persist(e=>{failure=e});await writeQueue;
+      if(failure){const ids=new Set(added.map(r=>r.id));state.rows=state.rows.filter(r=>!ids.has(r.id));throw Error('导入未保存，请重试；原文已保留');}
+      $('#dialog').close();tab='details';filter='all';query='';page=Math.ceil(state.rows.length/20);renderContent();renderSide();
+      const incomplete=added.filter(r=>detailError(r)).length;
+      toast(`已导入 ${added.length} 条明细${incomplete?'，其中 '+incomplete+' 条信息不完整，请编辑补齐':''}`);
+    }catch(e){error.textContent=e.message;importing=false;action.disabled=false;action.removeAttribute('aria-busy');}
+  },'primary');
+  modal('粘贴接龙 · 一键导入',h('div',{},h('p',{class:'help'},'每组填写昵称、货号、尺码、商品链接，可用空行分隔。数量未填默认 1；无需填写图片。信息不完整的明细仍会保存，补齐后才能加购。'),area,error),[btn('取消',()=>{if(!importing)$('#dialog').close()}),action]);
+  area.focus();
 }
 
 // Responsive projections of the same rows. No separate mobile state or calculations.
@@ -2759,7 +2575,7 @@ function mobileRecord(r, billing) {
       "div",
       { class: "mobile-product" },
       btn(imageNode(r), () => editRow(r), "image-button", {
-        "aria-label": `手机编辑第 ${r.seq} 行图片`,
+        "aria-label": `手机编辑第 ${r.seq} 行明细`,
       }),
       h(
         "div",
@@ -2807,7 +2623,7 @@ function mobileRecord(r, billing) {
           h(
             "p",
             { class: "mobile-formula" },
-            `${r.price || 0} ${r.currency || "JPY"} × ${a.discount} × ${r.quantity} × ${a.rate} + ${r.shipping || 0} = ${money(a.cny)} 人民币`,
+            `${r.price || 0} ${r.currency || "JPY"} × ${a.discount} × ${r.quantity} × ${a.rate} + ${a.shipping} = ${money(a.cny)} 人民币`,
           ),
         )
       : h(

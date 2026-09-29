@@ -1,9 +1,10 @@
-import {getMerchant} from './merchants.js';
+import {getMerchant, directProductURL} from './merchants.js';
 export const MAX_ITEMS = 20;
 export const DEFAULTS = {
   merchant: "https://www.petit-bateau.co.jp/",
   discount: 0.7,
   rate: 0.045,
+  shipping: 0,
 };
 export const uid = () => crypto.randomUUID();
 export const round = (n) => Math.round((n + Number.EPSILON) * 100) / 100;
@@ -14,6 +15,8 @@ export function amounts(row, settings) {
       : Number(row.discount);
   const rate =
     row.rate === "" || row.rate == null ? settings.rate : Number(row.rate);
+  const shipping = row.shipping === "" || row.shipping == null
+    ? Number(settings.shipping || 0) : Number(row.shipping);
   // price remains the persisted key for the current website price, preserving
   // all old workspaces/backups without altering the login/sync transport.
   const base = Number(row.price || 0) * discount * Number(row.quantity || 0);
@@ -21,8 +24,9 @@ export function amounts(row, settings) {
   return {
     discount,
     rate,
+    shipping,
     yen,
-    cny: round(base * rate + Number(row.shipping || 0)),
+    cny: round(base * rate + shipping),
   };
 }
 export function newRow(values = {}) {
@@ -37,7 +41,7 @@ export function newRow(values = {}) {
     image: "",
     url: "",
     quantity: 1,
-    shipping: 0,
+    shipping: "",
     price: 0,
     originalPrice: "",
     currency: "JPY",
@@ -47,6 +51,27 @@ export function newRow(values = {}) {
     note: "",
     ...values,
   };
+}
+// Strict editor/cart requirements are separate from legacy backup validation.
+// Old incomplete records remain readable and recoverable without data migration.
+export function detailError(row) {
+  if (!String(row.customer || '').trim()) return {key:'customer',message:'请填写客户昵称'};
+  if (!String(row.sku || '').trim()) return {key:'sku',message:'请填写货号'};
+  if (!String(row.size || '').trim()) return {key:'size',message:'请填写目标尺码（cm）'};
+  if (!productUrl(row.url)) return {key:'url',message:'请填写有效的商品链接'};
+  const message=validateRow(row);
+  if (!message) return null;
+  return {key:/数量/.test(message)?'quantity':/折扣/.test(message)?'discount':/汇率/.test(message)?'rate':'shipping',message};
+}
+export function safeProductImage(value) {
+  if(typeof value!=='string')return false;
+  if(/^data:image\/(?:png|jpeg|webp);base64,[A-Za-z0-9+/=]+$/.test(value))return true;
+  const url=productUrl(value);return Boolean(url && url.startsWith('https://'));
+}
+export function validQuote(q) {
+  return Boolean(q && typeof q.price==='number' && Number.isFinite(q.price) && q.price>=0 &&
+    (q.originalPrice===null || typeof q.originalPrice==='number' && Number.isFinite(q.originalPrice) && q.originalPrice>=q.price) &&
+    /^[A-Z]{3}$/.test(q.currency) && typeof q.readAt==='string' && Number.isFinite(Date.parse(q.readAt)) && productUrl(q.url));
 }
 export function validateRow(r) {
   if (
@@ -105,8 +130,9 @@ export function batchCheck(rows, settings) {
     return "请填写有效的商家网址";
   }
   for (const row of rows) {
-    const error = validateRow(row);
-    if (error) return `第 ${row.seq} 行：${error}`;
+    if (!directProductURL(row.url,getMerchant(settings.merchant))) return `第 ${row.seq} 行：请填写当前商家的商品详情页链接`;
+    const error = detailError(row);
+    if (error) return `第 ${row.seq} 行：${error.message}`;
   }
   return "";
 }

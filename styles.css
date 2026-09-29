@@ -1043,3 +1043,16 @@ input[aria-invalid="true"] {
     bottom: calc(84px + env(safe-area-inset-bottom));
   }
 }
+
+/* The editor owns one scrolling body; its actions remain in view. */
+#dialog[open] { display:flex; flex-direction:column; overflow:hidden; }
+#dialog > .dialog-head, #dialog > .dialog-foot { flex-shrink:0; }
+#dialog > .dialog-body { min-height:0; flex:1 1 auto; }
+.dialog-foot { flex-wrap:wrap; background:var(--surface); }
+.advanced-pricing { border-top:1px solid var(--line); margin-top:16px; padding-top:12px; }
+.advanced-pricing summary { cursor:pointer; font-weight:600; padding:8px 0; }
+.advanced-pricing summary:focus-visible { outline:2px solid var(--brand); outline-offset:2px; }
+.pricing-override { display:grid; grid-template-columns:1fr 1fr; gap:16px; margin-top:12px; }
+.price-readonly { margin-top:20px; }
+input[readonly] { color:var(--muted); background:var(--bg); }
+@media(max-width:640px) { .pricing-override { grid-template-columns:1fr; gap:8px; } }

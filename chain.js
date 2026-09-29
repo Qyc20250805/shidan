@@ -1,5 +1,9 @@
-import { newRow } from "./core.js";
+import { newRow, detailError } from "./core.js?pricing=1";
 export function parseChain(text) {
+  if (/^\s*(昵称|客户昵称)\s*[:：]/m.test(text) || !/^\s*\d+[.、)\s]/m.test(text) && /^\s*(货号|尺码|商品链接)\s*[:：]/m.test(text)) return parseFixedChain(text);
+  return parseLegacyChain(text);
+}
+function parseLegacyChain(text) {
   const shared = { sku: "", name: "", size: "", url: "" },
     rows = [],
     notes = [];
@@ -96,4 +100,31 @@ export function parseChain(text) {
   if (!rows.length)
     throw Error("没有识别到接龙行。每行请以“1. 昵称 …”或“1、昵称 …”开头。");
   return { rows, notes };
+}
+
+// Fixed groups never inherit missing fields from the preceding customer's order.
+function parseFixedChain(text) {
+  const rows=[],notes=[];
+  let values={},source=[],seen=new Set();
+  const keys={'昵称':'customer','客户昵称':'customer','货号':'sku','尺码':'size','目标尺码':'size','商品链接':'url','数量':'quantity','商品名称':'name','颜色':'color'};
+  function flush(){
+    if(!source.length)return;
+    const row=newRow({...values,note:source.join('\n')});
+    const issue=detailError(row);rows.push({row,issues:issue?[issue.message]:[]});
+    values={};source=[];seen=new Set();
+  }
+  for(const raw of text.replace(/^\uFEFF/,'').split(/\r?\n/)){
+    const line=raw.trim();if(!line){flush();continue;}
+    const m=line.match(/^(昵称|客户昵称|货号|目标尺码|尺码|商品链接|数量|商品名称|颜色)\s*[:：]\s*(.*)$/);
+    if(!m){notes.push(line);continue;}
+    const key=keys[m[1]];if(key==='customer'&&seen.has('customer'))flush();
+    if(seen.has(key))throw Error('同一组出现重复的'+m[1]+'，请用空行拆分商品');
+    seen.add(key);source.push(raw);let value=m[2].trim();
+    if(key==='url'){const link=value.match(/^\[[^\]]*\]\((https?:\/\/[^\s]+)\)$/);if(link)value=link[1];}
+    if(key==='size')value=value.normalize('NFKC').replace(/\s*(?:cm|码|厘米)$/i,'').trim();
+    if(key==='sku')value=value.toUpperCase();
+    values[key]=key==='quantity'?(value===''?1:Number(value.normalize('NFKC'))):value;
+  }
+  flush();if(!rows.length)throw Error('请粘贴“昵称：…、货号：…、尺码：…、商品链接：…”格式的接龙');
+  return {rows,notes};
 }
