@@ -4,8 +4,11 @@ export const MERCHANTS = [
  {id:'miki',name:'Miki House',origin:'https://www.mikihouse.co.jp',cartPath:'/cart',searchPath:'/search?q=',productPrefix:'/products/',type:'shopify'},
  {id:'montbell',name:'Montbell Japan',origin:'https://www.montbell.com',cartPath:'/jp/en/products/cart',searchPath:'/jp/en/products/list?q=',productPrefix:'/jp/en/products/detail/',type:'montbell'}
 ];
+export function sameMerchantOrigin(a,b) {
+ try {const x=new URL(a),y=new URL(b);return [x,y].every(u=>u.protocol==='https:'&&!u.port&&!u.username&&!u.password)&&x.hostname.replace(/^www\./,'')===y.hostname.replace(/^www\./,'');}catch{return false;}
+}
 export function getMerchant(value) {
- try { const u=new URL(value);if(u.username||u.password)return null;return MERCHANTS.find(m=>u.origin===m.origin&&(m.id!=='montbell'||u.pathname.startsWith('/jp/en/products'))) || null; } catch {return null;}
+ try { const u=new URL(value);if(u.username||u.password)return null;return MERCHANTS.find(m=>sameMerchantOrigin(u.href,m.origin)&&(m.id!=='montbell'||u.pathname.startsWith('/jp/en/products'))) || null; } catch {return null;}
 }
 export function searchURL(merchant,code){return merchant.origin+merchant.searchPath+encodeURIComponent(code)+(merchant.type==='shopify'?'&type=product':'');}
 
@@ -14,7 +17,7 @@ export function searchURL(merchant,code){return merchant.origin+merchant.searchP
 export function directProductURL(value, merchant) {
  try {
   const u = new URL(value);
-  if (!merchant || u.origin !== merchant.origin || u.username || u.password) return null;
+  if (!merchant || !sameMerchantOrigin(u.href,merchant.origin) || u.username || u.password) return null;
   if (!u.pathname.startsWith(merchant.productPrefix) || !u.pathname.slice(merchant.productPrefix.length).replace(/\/$/, '') || /\.(?:jpe?g|png|gif|webp|svg)$/i.test(u.pathname)) return null;
   u.hash = ''; return u.href;
  } catch { return null; }

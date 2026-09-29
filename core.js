@@ -1,4 +1,4 @@
-import {getMerchant, directProductURL} from './merchants.js';
+import {getMerchant, directProductURL} from './merchants.js?auto=1';
 export const MAX_ITEMS = 20;
 export const DEFAULTS = {
   merchant: "https://www.petit-bateau.co.jp/",

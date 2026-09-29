@@ -1,4 +1,4 @@
-import {getMerchant} from './merchants.js';
+import {getMerchant} from './merchants.js?auto=1';
 import { parseChain } from "./chain.js?pricing=1";
 let syncCodeModule;
 function loadSyncCode() {
@@ -25,7 +25,7 @@ import {
   csvCell,
   productUrl,
   round,
-} from "./core.js?pricing=1";
+} from "./core.js?auto=1";
 const $ = (s) => document.querySelector(s),
   $$ = (s) => [...document.querySelectorAll(s)];
 const h = (tag, attrs = {}, ...children) => {
@@ -1109,7 +1109,7 @@ function renderSide() {
     h(
       "p",
       { class: "note" },
-      "助手打开明细商品链接，读取网页主图，逐件人工核对后加购。不一致会标记“需人工核对”，不会下单或付款。",
+      "助手打开明细商品链接，读取网页主图，货号唯一匹配且目标尺码有货时自动加购。不一致会标记“需人工核对”，不会下单或付款。",
     ),
   );
 }
@@ -1529,7 +1529,7 @@ function helperRequest(type, data = {}, timeout = 8000) {
 }
 function helperStatus(r) {
   if (detailError(r)) return '信息不完整';
-  if (r.helper) return {pending:'待人工核对',added:'已处理',review:'需人工核对',failed:'加购失败'}[r.helper.status] || '可重新加购';
+  if (r.helper) return {pending:'正在加购',added:'已处理',review:'需人工核对',failed:'加购失败'}[r.helper.status] || '可重新加购';
   return {draft:'待处理',handoff:'已交接',ordered:'已下单'}[r.status] || '待处理';
 }
 function applyHelperResult(result) {
@@ -1542,7 +1542,7 @@ function applyHelperResult(result) {
     const row = state.rows.find(r => r.id === update.id && r.batchId === batch.id);
     const original = batch.rows.find(r => r.id === update.id);
     if (!original || !['pending','added','review','failed'].includes(update.status) || !Number.isSafeInteger(update.added) || update.added < 0 || update.added > original.quantity) continue;
-    const reason = update.reason || (update.status==='pending' ? (result.phase==='queued'?'商品页已打开，等待上一批完成；可继续选单':'请在商品页核对图片、颜色和尺码；可继续选单') : '');
+    const reason = update.reason || (update.status==='pending' ? (result.phase==='queued'?'商品页已打开，等待上一批完成；可继续选单':'正在核对货号和尺码并自动加购；可继续选单') : '');
     const next = {status:update.status,added:update.added,reason:String(reason).slice(0,180)};
     const identityMatches=row && ['sku','size','color','url'].every(key=>(row[key] || '')===(original[key] || ''));
     if(safeProductImage(update.webImage) && update.webImage.startsWith('https://')) {
@@ -1596,8 +1596,8 @@ function installHelper() {
   modal('安装 四商家加购助手', h('div', {},
     h('p', {}, '请使用电脑 Chrome。下载并解压安装包，文件夹第一层应包含 manifest.json。'),
     h('p', {}, '打开 chrome://extensions，开启“开发者模式”，点击“加载已解压的扩展程序”，选择解压文件夹。安装或更新后刷新拾单及商家页面。'),
-    h('a', {href:'./shidan-helper.zip?v=0.4.0-pricing1',download:'shidan-helper.zip',class:'primary'}, '下载 Chrome 扩展安装包'),
-    h('p', {class:'help'}, '已有旧版请移除旧版再加载此版本，避免两个助手同时工作。每件必须人工确认图片、颜色和尺码；仅加购物车，不提交订单、不付款。')
+    h('a', {href:'./shidan-helper.zip?v=0.4.0-auto1',download:'shidan-helper.zip',class:'primary'}, '下载 Chrome 扩展安装包'),
+    h('p', {class:'help'}, '已有旧版请移除旧版再加载此版本，避免两个助手同时工作。货号唯一匹配且目标尺码有货时自动加购，无法确认时停止；仅加购物车，不提交订单、不付款。')
   ), [btn('关闭', () => $('#dialog').close())]);
 }
 let helperStarting = false;
@@ -1612,7 +1612,7 @@ async function startHelper() {
   helperStarting = true;
   try {
     const hello = await helperRequest('SD_HELLO');
-    if (hello.version !== '0.4.0' || hello.pricing !== 'fixed-chain-v1') throw Error('请先更新本次 v0.4.0 加购助手安装包，再刷新拾单页面');
+    if (hello.version !== '0.4.0' || hello.pricing !== 'fixed-chain-v1' || hello.automatic !== 'unique-sku-v1') throw Error('请先更新本次 v0.4.0 加购助手安装包，再刷新拾单页面');
     if (epoch !== authEpoch || conflict) throw Error('工作台已切换，请重新选择商品');
     const current = selectRows();
     const problem = batchCheck(current, state.settings); if (problem) throw Error(problem);
